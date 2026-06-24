@@ -1,5 +1,6 @@
 import ast
 import json
+import os
 import re
 import unittest
 from pathlib import Path
@@ -41,7 +42,7 @@ def extract_function(nb: dict, function_name: str):
             if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 module = ast.Module(body=[node], type_ignores=[])
                 ast.fix_missing_locations(module)
-                namespace: dict[str, object] = {}
+                namespace: dict[str, object] = {"os": os}
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
     raise AssertionError(f"Function {function_name!r} was not found")
@@ -57,11 +58,13 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertTrue(all(cell["cell_type"] in {"markdown", "code"} for cell in self.nb["cells"]))
         self.assertTrue(all(not cell.get("outputs") for cell in self.nb["cells"] if cell["cell_type"] == "code"))
 
-    def test_smoke_test_precedes_pipeline_execution(self) -> None:
+    def test_setup_and_smoke_tests_precede_pipeline_execution(self) -> None:
         heading_positions = dict(markdown_headings(self.nb))
+        setup = next(index for index, heading in heading_positions.items() if heading == "## Setup checklist")
         smoke = next(index for index, heading in heading_positions.items() if heading == "## Smoke test bronze access")
         run = next(index for index, heading in heading_positions.items() if heading == "## Run pipeline")
         results = next(index for index, heading in heading_positions.items() if heading == "## Results summary")
+        self.assertLess(setup, smoke)
         self.assertLess(smoke, run)
         self.assertLess(run, results)
 
@@ -71,6 +74,38 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("ADME_OUTPUT_MODE", source)
         self.assertIn("ADME_REASSEMBLE", source)
         self.assertIn("Output mode", source)
+        self.assertIn('RUN_PROFILE = "interactive"', source)
+        self.assertIn('"dry_run"', source)
+
+    def test_explicit_tenant_config_and_repeatability_controls_are_present(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            'WORKSPACE_ID = ""',
+            'LAKEHOUSE_ID = ""',
+            'BRONZE_TABLE = "osducatalog"',
+            "PERSIST_SCHEMA_CACHE = True",
+            'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
+            'RUN_MANIFEST_TABLE = "silver_run_manifest"',
+            'schema_cache_writes_enabled = persist_schema_cache and run_profile == "full"',
+            "ADME_PERSIST_SCHEMA_CACHE",
+            "ADME_SCHEMA_CACHE_TABLE",
+            "ADME_RUN_MANIFEST_TABLE",
+        ]:
+            self.assertIn(expected, source)
+
+    def test_setup_checklist_dry_run_and_manifest_are_present(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            "def run_setup_checklist(",
+            "def run_silver_dry_run(",
+            "def preview_output_tables(",
+            "def write_run_manifest(",
+            "RUN_MANIFEST_SCHEMA",
+            "SCHEMA_CACHE_SCHEMA",
+            "_load_schema_doc_from_persistent_cache",
+            "_write_schema_doc_to_persistent_cache",
+        ]:
+            self.assertIn(expected, source)
 
     def test_no_hardcoded_environment_ids_or_driver_collected_changed_ids(self) -> None:
         raw = NOTEBOOK.read_text(encoding="utf-8")
@@ -93,6 +128,11 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertEqual(normalize_output_mode("reassembled"), "wide")
         with self.assertRaises(ValueError):
             normalize_output_mode("unsupported")
+
+    def test_env_bool(self) -> None:
+        env_bool = extract_function(self.nb, "_env_bool")
+        self.assertTrue(env_bool("MISSING_ENV_VALUE", True))
+        self.assertFalse(env_bool("MISSING_ENV_VALUE", False))
 
     def test_kind_to_table_name(self) -> None:
         kind_to_table_name = extract_function(self.nb, "kind_to_table_name")

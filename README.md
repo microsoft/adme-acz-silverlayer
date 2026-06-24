@@ -71,30 +71,35 @@ Before you run the notebook, make sure the customer environment has:
 2. Upload or import the notebook into your Microsoft Fabric workspace.
 3. Open the uploaded notebook in Microsoft Fabric.
 4. Attach the lakehouse that contains the ACZ bronze table, or set the workspace and lakehouse environment overrides.
-5. Review the notebook controls in the Configuration section.
-6. Set `RUN_PROFILE = "interactive"` to print effective settings without starting the pipeline.
-7. Run the Smoke test bronze access section to validate the bronze table and first selected kind.
-8. Set `RUN_PROFILE = "full"` when the configuration is correct.
-9. Run the Run Pipeline section, then review Results Summary.
-10. Review the generated Silver Layer tables and the `silver_run_info` table.
-11. Connect downstream analytics, reporting, or data engineering workloads to the Silver Layer outputs.
+5. Review the explicit tenant configuration block in the Configuration section.
+6. Set or confirm `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `OUTPUT_MODE`, and `TABLE_PREFIX`.
+7. Set `RUN_PROFILE = "interactive"` to print effective settings without starting the pipeline.
+8. Run the Setup checklist section to validate tenant configuration, bronze access, schema access, and planned output tables.
+9. Run the Smoke test bronze access section to validate the bronze table and first selected kind.
+10. Set `RUN_PROFILE = "dry_run"` and run the Run Pipeline section for a write-free preview.
+11. Set `RUN_PROFILE = "full"` when the configuration is correct, then run the Run Pipeline section.
+12. Review the generated Silver Layer tables, `silver_run_info`, and `silver_run_manifest`.
+13. Connect downstream analytics, reporting, or data engineering workloads to the Silver Layer outputs.
 
 ## Configure the notebook
 
-The notebook supports direct cell edits and environment variable overrides. Environment variables are useful for scheduled runs or CI/CD-style execution.
+The notebook is designed to run in a new tenant or workspace by editing one explicit tenant configuration block. Environment variables can still override the same settings for scheduled runs or CI/CD-style execution.
 
 | Control | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `RUN_PROFILE` | `ADME_RUN_PROFILE` | `full` | Use `interactive` to review settings without running. Use `full` to execute the pipeline. |
+| `WORKSPACE_ID` | `ADME_WORKSPACE_ID` | Empty string | Fabric workspace identifier. Leave blank to use the attached Fabric lakehouse context. |
+| `LAKEHOUSE_ID` | `ADME_LAKEHOUSE_ID` | Empty string | Fabric lakehouse identifier. Leave blank to use the attached Fabric lakehouse context. |
+| `BRONZE_TABLE` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
+| `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
 | `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs to process. Environment values are comma-separated. |
 | `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
 | `OUTPUT_MODE` | `ADME_OUTPUT_MODE` | `normalized` | Use `normalized` for parent and child tables, or `wide` for one table per kind. |
 | `DROP_WKT` | `ADME_DROP_WKT` | `True` | Drop WKT geometry columns from output tables. |
 | `TABLE_PREFIX` | `ADME_TABLE_PREFIX` | Empty string | Prefix all generated output table names. |
-| `bronze_table` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
-| `workspace_id` | `ADME_WORKSPACE_ID` | Runtime value | Fabric workspace identifier. Attach a lakehouse or set this value explicitly. |
-| `lakehouse_id` | `ADME_LAKEHOUSE_ID` | Runtime value | Fabric lakehouse identifier. Attach a lakehouse or set this value explicitly. |
+| `PERSIST_SCHEMA_CACHE` | `ADME_PERSIST_SCHEMA_CACHE` | `True` | Read resolved OSDU schemas from a Delta cache when available and persist newly resolved schemas during full runs. |
+| `SCHEMA_CACHE_TABLE` | `ADME_SCHEMA_CACHE_TABLE` | `silver_schema_cache` | Delta table used for persisted schema cache rows. |
+| `RUN_MANIFEST_TABLE` | `ADME_RUN_MANIFEST_TABLE` | `silver_run_manifest` | Delta table used to record per-kind output manifest rows. |
 | Lakehouse name fallback | `ADME_LAKEHOUSE_NAME` | `osducatalog` | Used only when the notebook must build a OneLake path from a lakehouse name. |
 
 `ADME_REASSEMBLE` is still accepted as a compatibility alias for older scheduled runs when `ADME_OUTPUT_MODE` is not set.
@@ -104,6 +109,8 @@ The notebook first tries the attached Fabric lakehouse catalog. If a table is no
 ```text
 abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Tables/{table_name}
 ```
+
+When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `TABLE_PREFIX`, and `OUTPUT_MODE`.
 
 ## Choose an output mode
 
@@ -128,8 +135,9 @@ The notebook is organized into these executable sections:
 | Helper Functions | Provides Fabric, OneLake, Delta write, upsert, and bronze-read helpers. |
 | Core Decomposition and Reassembly Logic | Resolves schemas, identifies column shapes, decomposes records, builds child tables, and reassembles wide outputs. |
 | Pipeline Functions | Processes one or more kinds and records run metadata. |
+| Setup checklist | Validates tenant configuration, first-kind bronze access, schema registry access, and planned output table names without writing Silver Layer tables. |
 | Smoke test bronze access | Reads at most one row for the first configured kind without writing Silver Layer tables. |
-| Run Pipeline | Executes the pipeline when `RUN_PROFILE = "full"` or prints next steps when `interactive`. |
+| Run Pipeline | Prints next steps when `interactive`, previews writes when `dry_run`, or executes when `full`. |
 | Results Summary | Displays the per-kind result table. |
 
 ## Review results
@@ -139,6 +147,8 @@ After a successful run, review:
 - The parent or reassembled table for each selected kind.
 - Generated child tables when `OUTPUT_MODE = "normalized"`.
 - `silver_run_info` for run status, record counts, failures, and error messages.
+- `silver_run_manifest` for per-kind output mode, parent table, child tables, row counts, status, and table prefix.
+- `silver_schema_cache` when persisted schema caching is enabled.
 - The Results Summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
 
 If a kind has no matching bronze records, the run returns `skipped` for that kind.
@@ -150,8 +160,11 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
 - Keep `DROP_WKT = True` unless WKT geometry columns are required by a downstream consumer.
 - Use `TABLE_PREFIX` to isolate test outputs from production Silver Layer tables.
-- Ensure the runtime can reach the OSDU schema registry before scheduled runs.
+- Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
+- Keep `PERSIST_SCHEMA_CACHE = True` for repeatability when the public OSDU schema registry is unavailable or changes unexpectedly. Dry runs can read the cache, but only full runs write new cache rows.
+- Ensure the runtime can reach the OSDU schema registry before the first run or when cache misses occur.
 - Review `silver_run_info` after each scheduled run to confirm per-kind status and record counts.
+- Review `silver_run_manifest` to onboard downstream consumers to the generated tables.
 
 ## Troubleshooting
 
@@ -160,9 +173,10 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | Bronze table not found | Confirm the lakehouse is attached, or set `ADME_WORKSPACE_ID`, `ADME_LAKEHOUSE_ID`, and `ADME_BRONZE_TABLE`. |
 | No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
 | Schema load fails | Confirm the runtime can access the OSDU schema registry URL and that the kind URN is valid. |
+| Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Output tables are overwritten unexpectedly | Check that `INCREMENTAL` is set correctly before running with `RUN_PROFILE = "full"`. |
 | Output table shape is too normalized | Use `OUTPUT_MODE = "wide"` to create one wide table per selected kind. |
-| Results Summary is empty | Confirm the Run Pipeline section executed and that `RUN_PROFILE` was set to `full`. |
+| Results Summary is empty | Confirm the Run Pipeline section executed and that `RUN_PROFILE` was set to `dry_run` or `full`. |
 
 ## Security
 
