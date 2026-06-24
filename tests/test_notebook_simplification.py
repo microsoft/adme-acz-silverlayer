@@ -48,6 +48,29 @@ def extract_function(nb: dict, function_name: str):
     raise AssertionError(f"Function {function_name!r} was not found")
 
 
+def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
+    wanted = set(function_names)
+    nodes: list[ast.FunctionDef] = []
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        tree = ast.parse("".join(cell.get("source", [])))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in wanted:
+                nodes.append(node)
+
+    found = {node.name for node in nodes}
+    missing = wanted - found
+    if missing:
+        raise AssertionError(f"Function(s) not found: {sorted(missing)}")
+
+    module = ast.Module(body=nodes, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace: dict[str, object] = {"json": json, "os": os, "re": re}
+    exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
+    return {name: namespace[name] for name in function_names}
+
+
 class NotebookSimplificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.nb = load_notebook()
@@ -96,6 +119,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_RUN_MANIFEST_TABLE",
             "KIND_LIMITS = {}",
             "ADME_KIND_LIMITS",
+            "kind_selectors",
             "WRITE_OUTPUT_DOCS = True",
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
             "ADME_WRITE_OUTPUT_DOCS",
@@ -110,6 +134,13 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def run_silver_dry_run(",
             "def preview_output_tables(",
             "def limit_for_kind(",
+            "def is_all_kinds_selector(",
+            "def kind_pattern_to_regex(",
+            "def matches_kind_selector(",
+            "def discover_bronze_kinds(",
+            "def resolve_kind_selectors(",
+            "def ensure_resolved_kinds(",
+            "def read_bronze_table_spark(",
             "def write_run_manifest(",
             "def write_output_documentation(",
             "def validate_table_names(",
@@ -173,6 +204,39 @@ class NotebookSimplificationTests(unittest.TestCase):
             parse_kind_limits("WellLog")
         with self.assertRaises(ValueError):
             parse_kind_limits({"WellLog": -1})
+
+    def test_wildcard_kind_selectors(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "is_all_kinds_selector",
+                "is_kind_pattern",
+                "kind_pattern_to_regex",
+                "matches_kind_selector",
+                "_clean_kind_selectors",
+                "kind_selectors_require_discovery",
+            ],
+        )
+        is_all_kinds_selector = funcs["is_all_kinds_selector"]
+        is_kind_pattern = funcs["is_kind_pattern"]
+        kind_pattern_to_regex = funcs["kind_pattern_to_regex"]
+        matches_kind_selector = funcs["matches_kind_selector"]
+        clean_kind_selectors = funcs["_clean_kind_selectors"]
+        kind_selectors_require_discovery = funcs["kind_selectors_require_discovery"]
+
+        welllog = "osdu:wks:work-product-component--WellLog:1.4.0"
+        wellbore = "osdu:wks:master-data--Wellbore:1.2.0"
+
+        self.assertTrue(is_all_kinds_selector("*:*:*:*"))
+        self.assertTrue(is_all_kinds_selector("*"))
+        self.assertTrue(is_all_kinds_selector("ALL"))
+        self.assertTrue(is_kind_pattern("osdu:wks:*:*"))
+        self.assertTrue(kind_pattern_to_regex("*:wks:work-product-component--Well*:1.*").match(welllog))
+        self.assertTrue(matches_kind_selector(welllog, "*:wks:work-product-component--Well*:1.*"))
+        self.assertFalse(matches_kind_selector(wellbore, "*:wks:work-product-component--Well*:1.*"))
+        self.assertEqual(clean_kind_selectors([" ", welllog, welllog, "all"]), [welllog, "all"])
+        self.assertTrue(kind_selectors_require_discovery([welllog, "osdu:wks:*:*"]))
+        self.assertFalse(kind_selectors_require_discovery([welllog]))
 
     def test_kind_to_table_name(self) -> None:
         kind_to_table_name = extract_function(self.nb, "kind_to_table_name")

@@ -93,7 +93,7 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `BRONZE_TABLE` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
 | `NOTEBOOK_VERSION` | None | `0.2.0` | Notebook implementation version written to run manifest rows. |
 | `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
-| `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs to process. Environment values are comma-separated. |
+| `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs, all-kinds markers, or wildcard patterns to process. Environment values are comma-separated. |
 | `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
 | `ALLOW_OVERWRITE` | `ADME_ALLOW_OVERWRITE` | `False` | Allow full refresh to replace existing output tables. Keep disabled for first runs in a new tenant. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
@@ -118,6 +118,17 @@ abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Tables/{t
 
 When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `KIND_LIMITS`, `TABLE_PREFIX`, `OUTPUT_MODE`, and `ALLOW_OVERWRITE`.
 
+`KINDS` can include explicit OSDU kind URNs or bronze-driven wildcard selectors. Wildcards are expanded from distinct `kind` values present in the configured bronze table:
+
+```python
+KINDS = ["*:*:*:*"]                              # all kinds in bronze
+KINDS = ["all"]                                  # all kinds in bronze
+KINDS = ["osdu:wks:*:*"]                         # all wks kinds in bronze
+KINDS = ["*:wks:work-product-component--Well*:1.*"]  # matching Well* WPC kinds
+```
+
+All-kinds and wildcard full runs can create many tables. Use Setup checklist, `RUN_PROFILE = "dry_run"`, `TABLE_PREFIX`, `LIMIT`, `KIND_LIMITS`, and `ALLOW_OVERWRITE` intentionally before running a large wildcard selection.
+
 ## Choose an output mode
 
 Use the output mode that matches the table shape required by downstream consumers.
@@ -141,7 +152,7 @@ The notebook is organized into these executable sections:
 | Helper Functions | Provides Fabric, OneLake, Delta write, upsert, and bronze-read helpers. |
 | Core Decomposition and Reassembly Logic | Resolves schemas, identifies column shapes, decomposes records, builds child tables, and reassembles wide outputs. |
 | Pipeline Functions | Processes one or more kinds and records run metadata. |
-| Setup checklist | Validates tenant configuration, first-kind bronze access, schema registry access, output table names, and planned output tables without writing Silver Layer tables. |
+| Setup checklist | Resolves wildcard kind selectors, validates tenant configuration, first-kind bronze access, schema registry access, output table names, and planned output tables without writing Silver Layer tables. |
 | Smoke test bronze access | Reads at most one row for the first configured kind without writing Silver Layer tables. |
 | Run Pipeline | Prints next steps when `interactive`, previews writes when `dry_run`, or executes when `full`. |
 | Results Summary | Displays the per-kind result table. |
