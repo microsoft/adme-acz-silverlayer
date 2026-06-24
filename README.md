@@ -77,9 +77,10 @@ Before you run the notebook, make sure the customer environment has:
 8. Run the Setup checklist section to validate tenant configuration, bronze access, schema access, and planned output tables.
 9. Run the Smoke test bronze access section to validate the bronze table and first selected kind.
 10. Set `RUN_PROFILE = "dry_run"` and run the Run Pipeline section for a write-free preview.
-11. Set `RUN_PROFILE = "full"` when the configuration is correct, then run the Run Pipeline section.
-12. Review the generated Silver Layer tables, `silver_run_info`, and `silver_run_manifest`.
-13. Connect downstream analytics, reporting, or data engineering workloads to the Silver Layer outputs.
+11. Set `ALLOW_OVERWRITE = True` only if a full refresh should replace existing output tables.
+12. Set `RUN_PROFILE = "full"` when the configuration is correct, then run the Run Pipeline section.
+13. Review the generated Silver Layer tables, `silver_run_info`, and `silver_run_manifest`.
+14. Connect downstream analytics, reporting, or data engineering workloads to the Silver Layer outputs.
 
 ## Configure the notebook
 
@@ -90,9 +91,11 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `WORKSPACE_ID` | `ADME_WORKSPACE_ID` | Empty string | Fabric workspace identifier. Leave blank to use the attached Fabric lakehouse context. |
 | `LAKEHOUSE_ID` | `ADME_LAKEHOUSE_ID` | Empty string | Fabric lakehouse identifier. Leave blank to use the attached Fabric lakehouse context. |
 | `BRONZE_TABLE` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
+| `NOTEBOOK_VERSION` | None | `0.2.0` | Notebook implementation version written to run manifest rows. |
 | `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
 | `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs to process. Environment values are comma-separated. |
 | `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
+| `ALLOW_OVERWRITE` | `ADME_ALLOW_OVERWRITE` | `False` | Allow full refresh to replace existing output tables. Keep disabled for first runs in a new tenant. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
 | `OUTPUT_MODE` | `ADME_OUTPUT_MODE` | `normalized` | Use `normalized` for parent and child tables, or `wide` for one table per kind. |
 | `DROP_WKT` | `ADME_DROP_WKT` | `True` | Drop WKT geometry columns from output tables. |
@@ -110,7 +113,7 @@ The notebook first tries the attached Fabric lakehouse catalog. If a table is no
 abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Tables/{table_name}
 ```
 
-When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `TABLE_PREFIX`, and `OUTPUT_MODE`.
+When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `TABLE_PREFIX`, `OUTPUT_MODE`, and `ALLOW_OVERWRITE`.
 
 ## Choose an output mode
 
@@ -135,7 +138,7 @@ The notebook is organized into these executable sections:
 | Helper Functions | Provides Fabric, OneLake, Delta write, upsert, and bronze-read helpers. |
 | Core Decomposition and Reassembly Logic | Resolves schemas, identifies column shapes, decomposes records, builds child tables, and reassembles wide outputs. |
 | Pipeline Functions | Processes one or more kinds and records run metadata. |
-| Setup checklist | Validates tenant configuration, first-kind bronze access, schema registry access, and planned output table names without writing Silver Layer tables. |
+| Setup checklist | Validates tenant configuration, first-kind bronze access, schema registry access, output table names, and planned output tables without writing Silver Layer tables. |
 | Smoke test bronze access | Reads at most one row for the first configured kind without writing Silver Layer tables. |
 | Run Pipeline | Prints next steps when `interactive`, previews writes when `dry_run`, or executes when `full`. |
 | Results Summary | Displays the per-kind result table. |
@@ -147,7 +150,7 @@ After a successful run, review:
 - The parent or reassembled table for each selected kind.
 - Generated child tables when `OUTPUT_MODE = "normalized"`.
 - `silver_run_info` for run status, record counts, failures, and error messages.
-- `silver_run_manifest` for per-kind output mode, parent table, child tables, row counts, status, and table prefix.
+- `silver_run_manifest` for per-kind output mode, notebook version, config hash, parent table, child tables, row counts, status, and table prefix.
 - `silver_schema_cache` when persisted schema caching is enabled.
 - The Results Summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
 
@@ -156,6 +159,7 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 ## Operational guidance
 
 - Use full refresh for initial loads, schema changes, and troubleshooting.
+- Keep `ALLOW_OVERWRITE = False` until a dry run confirms the planned tables. Set it to `True` only when full refresh should replace existing outputs.
 - Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent IDs.
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
 - Keep `DROP_WKT = True` unless WKT geometry columns are required by a downstream consumer.
@@ -174,6 +178,8 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
 | Schema load fails | Confirm the runtime can access the OSDU schema registry URL and that the kind URN is valid. |
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
+| Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
+| Table name validation fails | Update `TABLE_PREFIX`, cache table, or manifest table names to use only letters, numbers, and underscores, starting with a letter or underscore. |
 | Output tables are overwritten unexpectedly | Check that `INCREMENTAL` is set correctly before running with `RUN_PROFILE = "full"`. |
 | Output table shape is too normalized | Use `OUTPUT_MODE = "wide"` to create one wide table per selected kind. |
 | Results Summary is empty | Confirm the Run Pipeline section executed and that `RUN_PROFILE` was set to `dry_run` or `full`. |

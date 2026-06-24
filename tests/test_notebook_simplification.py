@@ -83,6 +83,10 @@ class NotebookSimplificationTests(unittest.TestCase):
             'WORKSPACE_ID = ""',
             'LAKEHOUSE_ID = ""',
             'BRONZE_TABLE = "osducatalog"',
+            'NOTEBOOK_VERSION = "0.2.0"',
+            "ALLOW_OVERWRITE = False",
+            "ADME_ALLOW_OVERWRITE",
+            "config_hash = hashlib.sha256",
             "PERSIST_SCHEMA_CACHE = True",
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
             'RUN_MANIFEST_TABLE = "silver_run_manifest"',
@@ -100,12 +104,25 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def run_silver_dry_run(",
             "def preview_output_tables(",
             "def write_run_manifest(",
+            "def validate_table_names(",
+            "def _assert_overwrite_allowed(",
             "RUN_MANIFEST_SCHEMA",
             "SCHEMA_CACHE_SCHEMA",
+            'T.StructField("notebook_version", T.StringType(), True)',
+            'T.StructField("config_hash", T.StringType(), True)',
+            'T.StructField("allow_overwrite", T.BooleanType(), True)',
             "_load_schema_doc_from_persistent_cache",
             "_write_schema_doc_to_persistent_cache",
         ]:
             self.assertIn(expected, source)
+
+    def test_full_run_receives_overwrite_and_metadata_arguments(self) -> None:
+        source = notebook_source(self.nb, "code")
+        self.assertIn("allow_overwrite=allow_overwrite", source)
+        self.assertIn("notebook_version=NOTEBOOK_VERSION", source)
+        self.assertIn("config_hash=config_hash", source)
+        self.assertIn("Full refresh would overwrite existing table(s)", source)
+        self.assertIn("Set ALLOW_OVERWRITE = True", source)
 
     def test_no_hardcoded_environment_ids_or_driver_collected_changed_ids(self) -> None:
         raw = NOTEBOOK.read_text(encoding="utf-8")
