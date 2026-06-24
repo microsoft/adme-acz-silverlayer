@@ -42,7 +42,7 @@ def extract_function(nb: dict, function_name: str):
             if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 module = ast.Module(body=[node], type_ignores=[])
                 ast.fix_missing_locations(module)
-                namespace: dict[str, object] = {"os": os}
+                namespace: dict[str, object] = {"json": json, "os": os}
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
     raise AssertionError(f"Function {function_name!r} was not found")
@@ -94,6 +94,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_PERSIST_SCHEMA_CACHE",
             "ADME_SCHEMA_CACHE_TABLE",
             "ADME_RUN_MANIFEST_TABLE",
+            "KIND_LIMITS = {}",
+            "ADME_KIND_LIMITS",
+            "WRITE_OUTPUT_DOCS = True",
+            'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
+            "ADME_WRITE_OUTPUT_DOCS",
+            "ADME_OUTPUT_DOCS_TABLE",
         ]:
             self.assertIn(expected, source)
 
@@ -103,16 +109,22 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def run_setup_checklist(",
             "def run_silver_dry_run(",
             "def preview_output_tables(",
+            "def limit_for_kind(",
             "def write_run_manifest(",
+            "def write_output_documentation(",
             "def validate_table_names(",
             "def _assert_overwrite_allowed(",
             "RUN_MANIFEST_SCHEMA",
             "SCHEMA_CACHE_SCHEMA",
+            "OUTPUT_DOCS_SCHEMA",
             'T.StructField("notebook_version", T.StringType(), True)',
             'T.StructField("config_hash", T.StringType(), True)',
             'T.StructField("allow_overwrite", T.BooleanType(), True)',
+            'T.StructField("table_role", T.StringType(), False)',
+            'T.StructField("column_name", T.StringType(), False)',
             "_load_schema_doc_from_persistent_cache",
             "_write_schema_doc_to_persistent_cache",
+            "silver_output_documentation",
         ]:
             self.assertIn(expected, source)
 
@@ -150,6 +162,17 @@ class NotebookSimplificationTests(unittest.TestCase):
         env_bool = extract_function(self.nb, "_env_bool")
         self.assertTrue(env_bool("MISSING_ENV_VALUE", True))
         self.assertFalse(env_bool("MISSING_ENV_VALUE", False))
+
+    def test_kind_limit_parser(self) -> None:
+        parse_kind_limits = extract_function(self.nb, "_parse_kind_limits")
+        self.assertEqual(parse_kind_limits(None), {})
+        self.assertEqual(parse_kind_limits({"WellLog": 10}), {"WellLog": 10})
+        self.assertEqual(parse_kind_limits('{"WellLog": 10}'), {"WellLog": 10})
+        self.assertEqual(parse_kind_limits("WellLog=10;wellboretrajectory=5"), {"WellLog": 10, "wellboretrajectory": 5})
+        with self.assertRaises(ValueError):
+            parse_kind_limits("WellLog")
+        with self.assertRaises(ValueError):
+            parse_kind_limits({"WellLog": -1})
 
     def test_kind_to_table_name(self) -> None:
         kind_to_table_name = extract_function(self.nb, "kind_to_table_name")

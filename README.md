@@ -72,7 +72,7 @@ Before you run the notebook, make sure the customer environment has:
 3. Open the uploaded notebook in Microsoft Fabric.
 4. Attach the lakehouse that contains the ACZ bronze table, or set the workspace and lakehouse environment overrides.
 5. Review the explicit tenant configuration block in the Configuration section.
-6. Set or confirm `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `OUTPUT_MODE`, and `TABLE_PREFIX`.
+6. Set or confirm `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `KIND_LIMITS`, `OUTPUT_MODE`, and `TABLE_PREFIX`.
 7. Set `RUN_PROFILE = "interactive"` to print effective settings without starting the pipeline.
 8. Run the Setup checklist section to validate tenant configuration, bronze access, schema access, and planned output tables.
 9. Run the Smoke test bronze access section to validate the bronze table and first selected kind.
@@ -97,12 +97,15 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
 | `ALLOW_OVERWRITE` | `ADME_ALLOW_OVERWRITE` | `False` | Allow full refresh to replace existing output tables. Keep disabled for first runs in a new tenant. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
+| `KIND_LIMITS` | `ADME_KIND_LIMITS` | Empty object | Optional per-kind limits keyed by full kind, table name, or entity name, for example `{"WellLog": 100}`. Environment values can be JSON or `key=value` pairs. |
 | `OUTPUT_MODE` | `ADME_OUTPUT_MODE` | `normalized` | Use `normalized` for parent and child tables, or `wide` for one table per kind. |
 | `DROP_WKT` | `ADME_DROP_WKT` | `True` | Drop WKT geometry columns from output tables. |
 | `TABLE_PREFIX` | `ADME_TABLE_PREFIX` | Empty string | Prefix all generated output table names. |
 | `PERSIST_SCHEMA_CACHE` | `ADME_PERSIST_SCHEMA_CACHE` | `True` | Read resolved OSDU schemas from a Delta cache when available and persist newly resolved schemas during full runs. |
 | `SCHEMA_CACHE_TABLE` | `ADME_SCHEMA_CACHE_TABLE` | `silver_schema_cache` | Delta table used for persisted schema cache rows. |
 | `RUN_MANIFEST_TABLE` | `ADME_RUN_MANIFEST_TABLE` | `silver_run_manifest` | Delta table used to record per-kind output manifest rows. |
+| `WRITE_OUTPUT_DOCS` | `ADME_WRITE_OUTPUT_DOCS` | `True` | Generate table and column documentation for produced Silver Layer outputs. |
+| `OUTPUT_DOCS_TABLE` | `ADME_OUTPUT_DOCS_TABLE` | `silver_output_documentation` | Delta table used for generated output documentation rows. |
 | Lakehouse name fallback | `ADME_LAKEHOUSE_NAME` | `osducatalog` | Used only when the notebook must build a OneLake path from a lakehouse name. |
 
 `ADME_REASSEMBLE` is still accepted as a compatibility alias for older scheduled runs when `ADME_OUTPUT_MODE` is not set.
@@ -113,7 +116,7 @@ The notebook first tries the attached Fabric lakehouse catalog. If a table is no
 abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Tables/{table_name}
 ```
 
-When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `TABLE_PREFIX`, `OUTPUT_MODE`, and `ALLOW_OVERWRITE`.
+When moving to another tenant, update the explicit tenant configuration block first. In most cases, the required changes are `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `KIND_LIMITS`, `TABLE_PREFIX`, `OUTPUT_MODE`, and `ALLOW_OVERWRITE`.
 
 ## Choose an output mode
 
@@ -152,6 +155,7 @@ After a successful run, review:
 - `silver_run_info` for run status, record counts, failures, and error messages.
 - `silver_run_manifest` for per-kind output mode, notebook version, config hash, parent table, child tables, row counts, status, and table prefix.
 - `silver_schema_cache` when persisted schema caching is enabled.
+- `silver_output_documentation` for generated table and column documentation, including table role, source column, column order, and data type.
 - The Results Summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
 
 If a kind has no matching bronze records, the run returns `skipped` for that kind.
@@ -162,6 +166,7 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Keep `ALLOW_OVERWRITE = False` until a dry run confirms the planned tables. Set it to `True` only when full refresh should replace existing outputs.
 - Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent IDs.
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
+- Use `KIND_LIMITS` to onboard large tenants one kind at a time without changing the global default limit.
 - Keep `DROP_WKT = True` unless WKT geometry columns are required by a downstream consumer.
 - Use `TABLE_PREFIX` to isolate test outputs from production Silver Layer tables.
 - Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
@@ -169,6 +174,7 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Ensure the runtime can reach the OSDU schema registry before the first run or when cache misses occur.
 - Review `silver_run_info` after each scheduled run to confirm per-kind status and record counts.
 - Review `silver_run_manifest` to onboard downstream consumers to the generated tables.
+- Review `silver_output_documentation` for generated table and column details.
 
 ## Troubleshooting
 
@@ -180,6 +186,7 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
 | Table name validation fails | Update `TABLE_PREFIX`, cache table, or manifest table names to use only letters, numbers, and underscores, starting with a letter or underscore. |
+| Output documentation was not written | Confirm `WRITE_OUTPUT_DOCS = True` and that the run reached table write steps for the selected kind. |
 | Output tables are overwritten unexpectedly | Check that `INCREMENTAL` is set correctly before running with `RUN_PROFILE = "full"`. |
 | Output table shape is too normalized | Use `OUTPUT_MODE = "wide"` to create one wide table per selected kind. |
 | Results Summary is empty | Confirm the Run Pipeline section executed and that `RUN_PROFILE` was set to `dry_run` or `full`. |
