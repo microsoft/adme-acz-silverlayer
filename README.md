@@ -95,6 +95,7 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
 | `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs, all-kinds markers, or wildcard patterns to process. Environment values are comma-separated. |
 | `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
+| `MERGE_KEY_COLUMNS` | `ADME_MERGE_KEY_COLUMNS` | `["id", "version"]` | Columns used for incremental parent/wide upserts and child replacement. Default preserves multiple OSDU record versions per ID. |
 | `ALLOW_OVERWRITE` | `ADME_ALLOW_OVERWRITE` | `False` | Allow full refresh to replace existing output tables. Keep disabled for first runs in a new tenant. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
 | `KIND_LIMITS` | `ADME_KIND_LIMITS` | Empty object | Optional per-kind limits keyed by full kind, table name, or entity name, for example `{"WellLog": 100}`. Environment values can be JSON or `key=value` pairs. |
@@ -109,7 +110,14 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `SCHEMA_CACHE_TABLE` | `ADME_SCHEMA_CACHE_TABLE` | `silver_schema_cache` | Delta table used for persisted schema cache rows. |
 | `RUN_MANIFEST_TABLE` | `ADME_RUN_MANIFEST_TABLE` | `silver_run_manifest` | Delta table used to record per-kind output manifest rows. |
 | `WRITE_OUTPUT_DOCS` | `ADME_WRITE_OUTPUT_DOCS` | `True` | Generate table and column documentation for produced Silver Layer outputs. |
+| `OUTPUT_DOCS_MODE` | `ADME_OUTPUT_DOCS_MODE` | `summary` | Use `summary` for one documentation row per table, `full` for column-level documentation, or `off` to skip output docs. |
 | `OUTPUT_DOCS_TABLE` | `ADME_OUTPUT_DOCS_TABLE` | `silver_output_documentation` | Delta table used for generated output documentation rows. |
+| `CACHE_BRONZE` | `ADME_CACHE_BRONZE` | `True` | Persist the bronze DataFrame during a run so discovery, counts, and kind processing can reuse it. |
+| `BRONZE_CACHE_STORAGE_LEVEL` | `ADME_BRONZE_CACHE_STORAGE_LEVEL` | `MEMORY_AND_DISK` | Spark storage level for the bronze cache. |
+| `PREFLIGHT_KIND_COUNTS` | `ADME_PREFLIGHT_KIND_COUNTS` | `True` | Compute kind row counts once before processing to avoid per-kind count scans. |
+| `BATCH_METADATA_WRITES` | `ADME_BATCH_METADATA_WRITES` | `True` | Buffer `silver_run_info` and `silver_run_manifest` rows and write them in batches. |
+| `METADATA_FLUSH_INTERVAL` | `ADME_METADATA_FLUSH_INTERVAL` | `25` | Flush metadata buffers after this many results, plus a final flush at the end or on exceptions. |
+| `SCHEMA_PREFLIGHT` | `ADME_SCHEMA_PREFLIGHT` | `True` | Resolve schemas for all selected kinds before processing groups, falling back to per-kind resolution if preflight fails. |
 | Lakehouse name fallback | `ADME_LAKEHOUSE_NAME` | `osducatalog` | Used only when the notebook must build a OneLake path from a lakehouse name. |
 
 `ADME_REASSEMBLE` is still accepted as a compatibility alias for older scheduled runs when `ADME_OUTPUT_MODE` is not set.
@@ -152,6 +160,12 @@ Use `VERSION_STRATEGY = "versioned_tables"` if you need strict physical separati
 
 When schemas cannot be resolved, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. This is useful for private tenant schemas that are not present in the public OSDU schema registry. Keep `PUBLIC_SCHEMA_AUTHORITY_FALLBACK = True` to resolve public schemas for bronze kinds whose authority differs from `osdu`.
 
+## Incremental merge keys
+
+The default `MERGE_KEY_COLUMNS = ["id", "version"]` treats the bronze `version` column as the OSDU record version. This allows multiple versions of the same record `id` to coexist in Silver Layer tables and makes repeated incremental runs idempotent for the same `id + version` pair.
+
+Do not confuse the bronze record `version` column with `schema_version`, which is derived from the kind URN. In incremental mode, parent/wide rows are merged by `MERGE_KEY_COLUMNS`, and child rows are replaced using the same key columns.
+
 ## Run the pipeline
 
 The notebook is organized into these executable sections:
@@ -187,7 +201,7 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 
 - Use full refresh for initial loads, schema changes, and troubleshooting.
 - Keep `ALLOW_OVERWRITE = False` until a dry run confirms the planned tables. Set it to `True` only when full refresh should replace existing outputs.
-- Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent IDs.
+- Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent merge keys. The default merge key is `id + version`.
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
 - Use `KIND_LIMITS` to onboard large tenants one kind at a time without changing the global default limit.
 - Keep `VERSION_STRATEGY = "merge"` for broad all-kinds runs unless downstream consumers require physically separate tables per schema version.
@@ -198,6 +212,9 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
 - Keep `PERSIST_SCHEMA_CACHE = True` for repeatability when the public OSDU schema registry is unavailable or changes unexpectedly. Dry runs can read the cache, but only full runs write new cache rows.
 - Ensure the runtime can reach the OSDU schema registry before the first run or when cache misses occur.
+- Keep `CACHE_BRONZE = True`, `PREFLIGHT_KIND_COUNTS = True`, and `SCHEMA_PREFLIGHT = True` for large wildcard runs to reduce repeated bronze scans and schema lookups.
+- Keep `BATCH_METADATA_WRITES = True` for broad runs. Metadata is flushed periodically and at the end, so completed output tables remain durable while reducing small Delta commits.
+- Use `OUTPUT_DOCS_MODE = "summary"` for broad runs. Switch to `full` only when column-level generated documentation is required.
 - Review `silver_run_info` after each scheduled run to confirm per-kind status and record counts.
 - Review `silver_run_manifest` to onboard downstream consumers to the generated tables.
 - Review `silver_output_documentation` for generated table and column details.

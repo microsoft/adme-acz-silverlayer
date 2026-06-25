@@ -42,7 +42,7 @@ def extract_function(nb: dict, function_name: str):
             if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 module = ast.Module(body=[node], type_ignores=[])
                 ast.fix_missing_locations(module)
-                namespace: dict[str, object] = {"json": json, "os": os}
+                namespace: dict[str, object] = {"json": json, "os": os, "MERGE_KEY_COLUMNS": ["id", "version"]}
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
     raise AssertionError(f"Function {function_name!r} was not found")
@@ -71,6 +71,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "os": os,
         "re": re,
         "WEB_RAW_ROOT": "https://community.opengroup.org/osdu/data/data-definitions/-/raw/master/",
+        "MERGE_KEY_COLUMNS": ["id", "version"],
     }
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
     return {name: namespace[name] for name in function_names}
@@ -113,6 +114,8 @@ class NotebookSimplificationTests(unittest.TestCase):
             'BRONZE_TABLE = "osducatalog"',
             'NOTEBOOK_VERSION = "0.2.0"',
             "ALLOW_OVERWRITE = False",
+            'MERGE_KEY_COLUMNS = ["id", "version"]',
+            "ADME_MERGE_KEY_COLUMNS",
             "ADME_ALLOW_OVERWRITE",
             "config_hash = hashlib.sha256",
             "PERSIST_SCHEMA_CACHE = True",
@@ -137,6 +140,18 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_MISSING_SCHEMA_MODE",
             "ADME_CREATE_EMPTY_CHILD_TABLES",
             "ADME_PUBLIC_SCHEMA_AUTHORITY_FALLBACK",
+            "CACHE_BRONZE = True",
+            'BRONZE_CACHE_STORAGE_LEVEL = "MEMORY_AND_DISK"',
+            "PREFLIGHT_KIND_COUNTS = True",
+            "BATCH_METADATA_WRITES = True",
+            "METADATA_FLUSH_INTERVAL = 25",
+            'OUTPUT_DOCS_MODE = "summary"',
+            "SCHEMA_PREFLIGHT = True",
+            "ADME_CACHE_BRONZE",
+            "ADME_PREFLIGHT_KIND_COUNTS",
+            "ADME_BATCH_METADATA_WRITES",
+            "ADME_OUTPUT_DOCS_MODE",
+            "ADME_SCHEMA_PREFLIGHT",
         ]:
             self.assertIn(expected, source)
 
@@ -154,6 +169,19 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def resolve_kind_selectors(",
             "def ensure_resolved_kinds(",
             "def read_bronze_table_spark(",
+            "def prepare_bronze_df(",
+            "def _merge_condition(",
+            "def _assert_no_duplicate_merge_keys(",
+            "def _validate_merge_key_columns(",
+            "def _effective_merge_key_columns(",
+            "def _align_source_to_target_schema(",
+            "def _read_target_df_for_merge(",
+            "def _reassemble_key_columns(",
+            "def compute_kind_counts(",
+            "def prefetch_schema_registry(",
+            "def flush_metadata_buffers(",
+            "def run_info_row(",
+            "def run_manifest_row(",
             "def kind_family_key(",
             "def kind_to_versioned_table_name(",
             "def group_kinds_by_version_strategy(",
@@ -178,8 +206,19 @@ class NotebookSimplificationTests(unittest.TestCase):
             "_load_schema_doc_from_persistent_cache",
             "_write_schema_doc_to_persistent_cache",
             "silver_output_documentation",
+            "Timing summary",
+            "metadata_flush",
         ]:
             self.assertIn(expected, source)
+
+    def test_performance_resilience_controls_are_present(self) -> None:
+        source = notebook_source(self.nb, "code")
+        self.assertIn("flush_metadata_buffers(spark, run_info_rows, manifest_rows, workspace_id, lakehouse_id)", source)
+        self.assertIn("finally:", source)
+        self.assertIn("bronze_df.unpersist()", source)
+        self.assertIn("_table_exists(spark, name, refresh=True)", source)
+        self.assertIn("_TABLE_EXISTS_CACHE[target] = True", source)
+        self.assertIn('docs_mode == "summary"', source)
 
     def test_full_run_receives_overwrite_and_metadata_arguments(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -188,6 +227,12 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("config_hash=config_hash", source)
         self.assertIn("Full refresh would overwrite existing table(s)", source)
         self.assertIn("Set ALLOW_OVERWRITE = True", source)
+        self.assertIn("merge_key_columns=merge_key_columns", source)
+        self.assertIn("changed_keys_df", source)
+        self.assertIn("_merge_condition(\"target\", \"changed\", merge_key_columns)", source)
+        self.assertIn("_align_source_to_target_schema(df, target_df)", source)
+        self.assertIn("parent.join(pivoted, on=key_cols", source)
+        self.assertIn("parent.join(agg_df, on=key_cols", source)
 
     def test_no_hardcoded_environment_ids_or_driver_collected_changed_ids(self) -> None:
         raw = NOTEBOOK.read_text(encoding="utf-8")
@@ -226,6 +271,21 @@ class NotebookSimplificationTests(unittest.TestCase):
             parse_kind_limits("WellLog")
         with self.assertRaises(ValueError):
             parse_kind_limits({"WellLog": -1})
+
+    def test_merge_key_parser_and_condition(self) -> None:
+        parse_merge_key_columns = extract_function(self.nb, "_parse_merge_key_columns")
+        self.assertEqual(parse_merge_key_columns(["id", "version"]), ["id", "version"])
+        self.assertEqual(parse_merge_key_columns("id,version"), ["id", "version"])
+        self.assertEqual(parse_merge_key_columns('["id", "version"]'), ["id", "version"])
+        self.assertEqual(parse_merge_key_columns(""), ["id", "version"])
+        with self.assertRaises(ValueError):
+            parse_merge_key_columns([])
+
+        merge_condition = extract_function(self.nb, "_merge_condition")
+        self.assertEqual(
+            merge_condition("target", "source", ["id", "version"]),
+            "target.`id` = source.`id` AND target.`version` = source.`version`",
+        )
 
     def test_wildcard_kind_selectors(self) -> None:
         funcs = extract_functions(
