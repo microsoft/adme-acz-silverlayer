@@ -66,7 +66,12 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
 
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace: dict[str, object] = {"json": json, "os": os, "re": re}
+    namespace: dict[str, object] = {
+        "json": json,
+        "os": os,
+        "re": re,
+        "WEB_RAW_ROOT": "https://community.opengroup.org/osdu/data/data-definitions/-/raw/master/",
+    }
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
     return {name: namespace[name] for name in function_names}
 
@@ -124,6 +129,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
             "ADME_WRITE_OUTPUT_DOCS",
             "ADME_OUTPUT_DOCS_TABLE",
+            'VERSION_STRATEGY = "merge"',
+            'MISSING_SCHEMA_MODE = "skip"',
+            "CREATE_EMPTY_CHILD_TABLES = True",
+            "PUBLIC_SCHEMA_AUTHORITY_FALLBACK = True",
+            "ADME_VERSION_STRATEGY",
+            "ADME_MISSING_SCHEMA_MODE",
+            "ADME_CREATE_EMPTY_CHILD_TABLES",
+            "ADME_PUBLIC_SCHEMA_AUTHORITY_FALLBACK",
         ]:
             self.assertIn(expected, source)
 
@@ -141,6 +154,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def resolve_kind_selectors(",
             "def ensure_resolved_kinds(",
             "def read_bronze_table_spark(",
+            "def kind_family_key(",
+            "def kind_to_versioned_table_name(",
+            "def group_kinds_by_version_strategy(",
+            "def detect_table_collisions(",
+            "def process_kind_group(",
+            "def _schema_url_candidates(",
             "def write_run_manifest(",
             "def write_output_documentation(",
             "def validate_table_names(",
@@ -153,6 +172,9 @@ class NotebookSimplificationTests(unittest.TestCase):
             'T.StructField("allow_overwrite", T.BooleanType(), True)',
             'T.StructField("table_role", T.StringType(), False)',
             'T.StructField("column_name", T.StringType(), False)',
+            'T.StructField("version_strategy", T.StringType(), True)',
+            'T.StructField("schema_versions", T.ArrayType(T.StringType()), True)',
+            'T.StructField("schema_mode", T.StringType(), True)',
             "_load_schema_doc_from_persistent_cache",
             "_write_schema_doc_to_persistent_cache",
             "silver_output_documentation",
@@ -249,6 +271,44 @@ class NotebookSimplificationTests(unittest.TestCase):
             "well",
         )
         self.assertEqual(kind_to_table_name("Custom-Entity.Name"), "custom_entity_name")
+
+    def test_version_strategy_helpers(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "kind_parts",
+                "kind_family_key",
+                "kind_version",
+                "kind_to_table_name",
+                "kind_to_versioned_table_name",
+                "group_kinds_by_version_strategy",
+                "table_name_for_kind_group",
+                "detect_table_collisions",
+            ],
+        )
+        family = funcs["kind_family_key"]
+        version = funcs["kind_version"]
+        versioned = funcs["kind_to_versioned_table_name"]
+        group = funcs["group_kinds_by_version_strategy"]
+        collisions = funcs["detect_table_collisions"]
+
+        kinds = [
+            "osdu:wks:master-data--Organisation:1.0.0",
+            "osdu:wks:master-data--Organisation:1.2.0",
+        ]
+        self.assertEqual(family(kinds[0]), "osdu:wks:master-data--Organisation")
+        self.assertEqual(version(kinds[1]), "1.2.0")
+        self.assertEqual(versioned(kinds[1]), "organisation__v1_2_0")
+        self.assertEqual(len(group(kinds, "merge")), 1)
+        self.assertEqual(len(group(kinds, "versioned_tables")), 2)
+        self.assertTrue(collisions(kinds, "", "merge")[0]["safe"])
+
+    def test_schema_url_candidates_include_osdu_fallback(self) -> None:
+        funcs = extract_functions(self.nb, ["parse_kind", "source_folder_for_kind", "_schema_url_candidates"])
+        candidates = funcs["_schema_url_candidates"]("data:wks:dataset--File.Generic:1.0.0")
+        urls = [url for url, _ in candidates]
+        self.assertTrue(any("/data/dataset/File.Generic.1.0.0.json" in url for url in urls))
+        self.assertTrue(any("/osdu/dataset/File.Generic.1.0.0.json" in url for url in urls))
 
 
 if __name__ == "__main__":

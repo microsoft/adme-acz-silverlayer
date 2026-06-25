@@ -99,6 +99,10 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
 | `KIND_LIMITS` | `ADME_KIND_LIMITS` | Empty object | Optional per-kind limits keyed by full kind, table name, or entity name, for example `{"WellLog": 100}`. Environment values can be JSON or `key=value` pairs. |
 | `OUTPUT_MODE` | `ADME_OUTPUT_MODE` | `normalized` | Use `normalized` for parent and child tables, or `wide` for one table per kind. |
+| `VERSION_STRATEGY` | `ADME_VERSION_STRATEGY` | `merge` | Use `merge` to union multiple schema versions into one logical entity table, or `versioned_tables` to suffix tables by schema version. |
+| `MISSING_SCHEMA_MODE` | `ADME_MISSING_SCHEMA_MODE` | `skip` | Use `skip`, `infer`, or `fail` when a kind schema cannot be resolved. `skip` is recommended for schema-correct Silver outputs. |
+| `CREATE_EMPTY_CHILD_TABLES` | `ADME_CREATE_EMPTY_CHILD_TABLES` | `True` | Create schema-defined child tables even when the current batch has no rows for those arrays. |
+| `PUBLIC_SCHEMA_AUTHORITY_FALLBACK` | `ADME_PUBLIC_SCHEMA_AUTHORITY_FALLBACK` | `True` | Try the public `osdu` authority when a non-`osdu` kind authority is not found in the public schema registry. |
 | `DROP_WKT` | `ADME_DROP_WKT` | `True` | Drop WKT geometry columns from output tables. |
 | `TABLE_PREFIX` | `ADME_TABLE_PREFIX` | Empty string | Prefix all generated output table names. |
 | `PERSIST_SCHEMA_CACHE` | `ADME_PERSIST_SCHEMA_CACHE` | `True` | Read resolved OSDU schemas from a Delta cache when available and persist newly resolved schemas during full runs. |
@@ -140,6 +144,14 @@ Use the output mode that matches the table shape required by downstream consumer
 
 Decomposition preserves repeated structures as related tables. Reassembly trades normalization for a wider table shape by expanding struct arrays into indexed columns, pivoting tags, and concatenating primitive arrays.
 
+## Handle multiple schema versions
+
+The default `VERSION_STRATEGY = "merge"` groups concrete kinds by authority, source, and entity, then unions schema versions into one logical table with nullable columns for fields that only exist in some versions. For example, `osdu:wks:master-data--Organisation:1.0.0` and `osdu:wks:master-data--Organisation:1.2.0` both write to `organisation` once, with `schema_version` and `osdu_kind` metadata columns preserving the source version.
+
+Use `VERSION_STRATEGY = "versioned_tables"` if you need strict physical separation by schema version. Versioned mode writes tables such as `organisation__v1_2_0`.
+
+When schemas cannot be resolved, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. This is useful for private tenant schemas that are not present in the public OSDU schema registry. Keep `PUBLIC_SCHEMA_AUTHORITY_FALLBACK = True` to resolve public schemas for bronze kinds whose authority differs from `osdu`.
+
 ## Run the pipeline
 
 The notebook is organized into these executable sections:
@@ -164,7 +176,7 @@ After a successful run, review:
 - The parent or reassembled table for each selected kind.
 - Generated child tables when `OUTPUT_MODE = "normalized"`.
 - `silver_run_info` for run status, record counts, failures, and error messages.
-- `silver_run_manifest` for per-kind output mode, notebook version, config hash, parent table, child tables, row counts, status, and table prefix.
+- `silver_run_manifest` for per-kind output mode, version strategy, schema version, schema mode, notebook version, config hash, parent table, child tables, row counts, status, and table prefix.
 - `silver_schema_cache` when persisted schema caching is enabled.
 - `silver_output_documentation` for generated table and column documentation, including table role, source column, column order, and data type.
 - The Results Summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
@@ -178,6 +190,9 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent IDs.
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
 - Use `KIND_LIMITS` to onboard large tenants one kind at a time without changing the global default limit.
+- Keep `VERSION_STRATEGY = "merge"` for broad all-kinds runs unless downstream consumers require physically separate tables per schema version.
+- Keep `MISSING_SCHEMA_MODE = "skip"` for schema-correct runs that should continue past private or unsupported schemas.
+- Keep `CREATE_EMPTY_CHILD_TABLES = True` when downstream consumers need stable child-table contracts.
 - Keep `DROP_WKT = True` unless WKT geometry columns are required by a downstream consumer.
 - Use `TABLE_PREFIX` to isolate test outputs from production Silver Layer tables.
 - Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
@@ -194,6 +209,8 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | Bronze table not found | Confirm the lakehouse is attached, or set `ADME_WORKSPACE_ID`, `ADME_LAKEHOUSE_ID`, and `ADME_BRONZE_TABLE`. |
 | No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
 | Schema load fails | Confirm the runtime can access the OSDU schema registry URL and that the kind URN is valid. |
+| Private/custom schemas are skipped | Add schemas to the persisted schema cache or use `MISSING_SCHEMA_MODE = "infer"` for best-effort output. |
+| Multiple versions collide | Use the default `VERSION_STRATEGY = "merge"` or switch to `versioned_tables` for physical separation. |
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
 | Table name validation fails | Update `TABLE_PREFIX`, cache table, or manifest table names to use only letters, numbers, and underscores, starting with a letter or underscore. |
