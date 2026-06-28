@@ -2,7 +2,7 @@
 
 Use the Azure Data Manager for Energy (ADME) Analytics Consumption Zone (ACZ) Silver Layer notebook to transform nested OSDU records into reusable Delta tables for analytics, reporting, and downstream data engineering.
 
-The notebook reads bronze OSDU records from ACZ, resolves OSDU schemas from the public schema registry, decomposes nested JSON into relational tables, and writes Silver Layer Delta outputs.
+The notebook reads bronze OSDU records from ACZ, resolves OSDU schemas from the ADME schema service, decomposes nested JSON into relational tables, and writes Silver Layer Delta outputs.
 
 ## Overview
 
@@ -11,7 +11,7 @@ OSDU records are deeply nested JSON documents with arrays and objects that are d
 `ADME ACZ Silver Layer.ipynb` prepares OSDU data for Silver Layer consumption by:
 
 - Reading OSDU records from an ACZ bronze Delta table.
-- Resolving kind schemas from the OSDU data definitions repository.
+- Resolving kind schemas from the configured ADME instance schema service.
 - Flattening scalar and object fields into table columns.
 - Splitting array fields into child tables, or optionally reassembling them into one wide table.
 - Writing Delta tables into the attached Microsoft Fabric lakehouse or a resolved OneLake path.
@@ -30,7 +30,7 @@ Analytics Consumption Zone bronze Delta table
         v
 ADME ACZ Silver Layer notebook
         |
-        +--> OSDU schema registry lookup
+        +--> ADME schema service lookup
         +--> Type inference and flattening
         +--> Decomposition or reassembly
         |
@@ -62,8 +62,10 @@ Before you run the notebook, make sure the customer environment has:
 - A configured Analytics Consumption Zone. For setup guidance, see [Enable Analytics Consumption Zone](https://learn.microsoft.com/en-us/azure/energy-data-services/how-to-enable-analytics-consumption-zone?tabs=bash).
 - A Microsoft Fabric workspace and lakehouse that can access ACZ bronze Delta tables.
 - Permission to read the bronze table and write Silver Layer Delta tables.
+- A service principal with permission to call the ADME schema service, including listing schemas with `GET /api/schema-service/v1/schema?latestVersion=False&limit=1`.
+- A Key Vault secret containing the service principal client secret, plus notebook permission to read that secret. For interactive testing, device-code authentication is also supported.
 - A Fabric notebook runtime with a Synapse PySpark kernel.
-- Network access from the runtime to the OSDU schema registry at `https://community.opengroup.org/osdu/data/data-definitions`.
+- Network access from the runtime to the ADME endpoint, for example `https://contoso.energy.azure.com`.
 
 ## Get started
 
@@ -72,9 +74,9 @@ Before you run the notebook, make sure the customer environment has:
 3. Open the uploaded notebook in Microsoft Fabric.
 4. Attach the lakehouse that contains the ACZ bronze table, or set the workspace and lakehouse environment overrides.
 5. Review the explicit tenant configuration block in the Configuration section.
-6. Set or confirm `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `KINDS`, `KIND_LIMITS`, `OUTPUT_MODE`, and `TABLE_PREFIX`.
+6. Set or confirm `WORKSPACE_ID`, `LAKEHOUSE_ID`, `BRONZE_TABLE`, `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID`, ADME authentication settings, `KINDS`, `KIND_LIMITS`, `OUTPUT_MODE`, and `TABLE_PREFIX`.
 7. Set `RUN_PROFILE = "interactive"` to print effective settings without starting the pipeline.
-8. Run the Setup checklist section to validate tenant configuration, bronze access, schema access, and planned output tables.
+8. Run the Setup checklist section to validate tenant configuration, bronze access, ADME schema access, and planned output tables.
 9. Run the Smoke test bronze access section to validate the bronze table and first selected kind.
 10. Set `RUN_PROFILE = "dry_run"` and run the Run Pipeline section for a write-free preview.
 11. Set `ALLOW_OVERWRITE = True` only if a full refresh should replace existing output tables.
@@ -84,13 +86,22 @@ Before you run the notebook, make sure the customer environment has:
 
 ## Configure the notebook
 
-The notebook is designed to run in a new tenant or workspace by editing one explicit tenant configuration block. Environment variables can still override the same settings for scheduled runs or CI/CD-style execution.
+The notebook is designed to run in a new tenant or workspace by editing one explicit tenant configuration block. Environment variables can still override the same settings for scheduled runs or CI/CD-style execution. `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID`, and ADME authentication settings are required for schema lookup.
+
+`ADME_TOKEN_SCOPE = "https://management.core.windows.net/.default"` and `ADME_DEVICE_CODE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"` are static authentication constants in the notebook, not customer-specific tenant configuration. `ADME_TOKEN_SCOPE` is the OAuth scope used to request the ADME access token.
 
 | Control | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `WORKSPACE_ID` | `ADME_WORKSPACE_ID` | Empty string | Fabric workspace identifier. Leave blank to use the attached Fabric lakehouse context. |
 | `LAKEHOUSE_ID` | `ADME_LAKEHOUSE_ID` | Empty string | Fabric lakehouse identifier. Leave blank to use the attached Fabric lakehouse context. |
 | `BRONZE_TABLE` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
+| `ADME_ENDPOINT` | `ADME_ENDPOINT` | Empty string | Required ADME instance endpoint, for example `https://contoso.energy.azure.com`. Trailing slashes are removed. |
+| `ADME_DATA_PARTITION_ID` | `ADME_DATA_PARTITION_ID` | Empty string | Required OSDU data partition id sent as the `data-partition-id` header for schema service calls. |
+| `ADME_AUTH_METHOD` | `ADME_AUTH_METHOD` | `SP` | Authentication mode for ADME schema service calls. Use `SP` for service principal client credentials or `DC` for device-code authentication. |
+| `ADME_TENANT_ID` | `ADME_TENANT_ID` | Empty string | Required Microsoft Entra tenant id for both `SP` and `DC` authentication. |
+| `ADME_SP_CLIENT_ID` | `ADME_SP_CLIENT_ID` | Empty string | Required service principal application client id when `ADME_AUTH_METHOD = "SP"`. |
+| `ADME_SP_SECRET_KV_NAME` | `ADME_SP_SECRET_KV_NAME` | Empty string | Required Key Vault name or URL containing the service principal secret when `ADME_AUTH_METHOD = "SP"`. |
+| `ADME_SP_SECRET_NAME` | `ADME_SP_SECRET_NAME` | Empty string | Required Key Vault secret name containing the service principal secret when `ADME_AUTH_METHOD = "SP"`. |
 | `NOTEBOOK_VERSION` | None | `0.2.0` | Notebook implementation version written to run manifest rows. |
 | `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
 | `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs, all-kinds markers, or wildcard patterns to process. Environment values are comma-separated. |
@@ -103,20 +114,19 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `VERSION_STRATEGY` | `ADME_VERSION_STRATEGY` | `merge` | Use `merge` to union multiple schema versions into one logical entity table, or `versioned_tables` to suffix tables by schema version. |
 | `MISSING_SCHEMA_MODE` | `ADME_MISSING_SCHEMA_MODE` | `skip` | Use `skip`, `infer`, or `fail` when a kind schema cannot be resolved. `skip` is recommended for schema-correct Silver outputs. |
 | `CREATE_EMPTY_CHILD_TABLES` | `ADME_CREATE_EMPTY_CHILD_TABLES` | `True` | Create schema-defined child tables even when the current batch has no rows for those arrays. |
-| `PUBLIC_SCHEMA_AUTHORITY_FALLBACK` | `ADME_PUBLIC_SCHEMA_AUTHORITY_FALLBACK` | `True` | Try the public `osdu` authority when a non-`osdu` kind authority is not found in the public schema registry. |
 | `DROP_WKT` | `ADME_DROP_WKT` | `True` | Drop WKT geometry columns from output tables. |
 | `TABLE_PREFIX` | `ADME_TABLE_PREFIX` | Empty string | Prefix all generated output table names. |
-| `PERSIST_SCHEMA_CACHE` | `ADME_PERSIST_SCHEMA_CACHE` | `True` | Read resolved OSDU schemas from a Delta cache when available and persist newly resolved schemas during full runs. |
+| `PERSIST_SCHEMA_CACHE` | `ADME_PERSIST_SCHEMA_CACHE` | `True` | Read resolved OSDU schemas from a Delta cache when available and persist newly resolved schemas during full runs. Cached rows are reused only when the kind, ADME endpoint, and data partition match the current configuration. |
 | `SCHEMA_CACHE_TABLE` | `ADME_SCHEMA_CACHE_TABLE` | `silver_schema_cache` | Delta table used for persisted schema cache rows. |
 | `RUN_MANIFEST_TABLE` | `ADME_RUN_MANIFEST_TABLE` | `silver_run_manifest` | Delta table used to record per-kind output manifest rows. |
-| `WRITE_OUTPUT_DOCS` | `ADME_WRITE_OUTPUT_DOCS` | `True` | Generate table and column documentation for produced Silver Layer outputs. |
+| `WRITE_OUTPUT_DOCS` | `ADME_WRITE_OUTPUT_DOCS` | `True` | Generate table and column documentation for produced Silver Layer outputs. Documentation rows are buffered with metadata batches during full builds. |
 | `OUTPUT_DOCS_MODE` | `ADME_OUTPUT_DOCS_MODE` | `summary` | Use `summary` for one documentation row per table, `full` for column-level documentation, or `off` to skip output docs. |
 | `OUTPUT_DOCS_TABLE` | `ADME_OUTPUT_DOCS_TABLE` | `silver_output_documentation` | Delta table used for generated output documentation rows. |
 | `CACHE_BRONZE` | `ADME_CACHE_BRONZE` | `True` | Persist the bronze DataFrame during a run so discovery, counts, and kind processing can reuse it. |
 | `BRONZE_CACHE_STORAGE_LEVEL` | `ADME_BRONZE_CACHE_STORAGE_LEVEL` | `MEMORY_AND_DISK` | Spark storage level for the bronze cache. |
 | `PREFLIGHT_KIND_COUNTS` | `ADME_PREFLIGHT_KIND_COUNTS` | `True` | Compute kind row counts once before processing to avoid per-kind count scans. |
-| `BATCH_METADATA_WRITES` | `ADME_BATCH_METADATA_WRITES` | `True` | Buffer `silver_run_info` and `silver_run_manifest` rows and write them in batches. |
-| `METADATA_FLUSH_INTERVAL` | `ADME_METADATA_FLUSH_INTERVAL` | `25` | Flush metadata buffers after this many results, plus a final flush at the end or on exceptions. |
+| `BATCH_METADATA_WRITES` | `ADME_BATCH_METADATA_WRITES` | `True` | Buffer `silver_run_info`, `silver_run_manifest`, and output documentation rows and write them in batches. |
+| `METADATA_FLUSH_INTERVAL` | `ADME_METADATA_FLUSH_INTERVAL` | `100` | Flush metadata and documentation buffers after this many results, plus a final flush at the end or on exceptions. |
 | `SCHEMA_PREFLIGHT` | `ADME_SCHEMA_PREFLIGHT` | `True` | Resolve schemas for all selected kinds before processing groups, falling back to per-kind resolution if preflight fails. |
 | Lakehouse name fallback | `ADME_LAKEHOUSE_NAME` | `osducatalog` | Used only when the notebook must build a OneLake path from a lakehouse name. |
 
@@ -158,7 +168,7 @@ The default `VERSION_STRATEGY = "merge"` groups concrete kinds by authority, sou
 
 Use `VERSION_STRATEGY = "versioned_tables"` if you need strict physical separation by schema version. Versioned mode writes tables such as `organisation__v1_2_0`.
 
-When schemas cannot be resolved, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. This is useful for private tenant schemas that are not present in the public OSDU schema registry. Keep `PUBLIC_SCHEMA_AUTHORITY_FALLBACK = True` to resolve public schemas for bronze kinds whose authority differs from `osdu`.
+When schemas cannot be resolved from the configured ADME schema service, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. Use `fail` when schema lookup failures should stop the run. The notebook does not fall back to the public OSDU data-definitions repository.
 
 ## Incremental merge keys
 
@@ -173,12 +183,12 @@ The notebook is organized into these executable sections:
 | Section | Purpose |
 | --- | --- |
 | Spark Runtime Configuration | Reuses the Fabric Spark session or creates one outside Fabric, then applies Spark and Delta settings. |
-| Configuration | Resolves user controls, environment overrides, workspace, lakehouse, bronze table, and selected kinds. |
+| Configuration | Resolves user controls, environment overrides, workspace, lakehouse, bronze table, ADME schema service settings, and selected kinds. |
 | Pipeline Constants | Defines service endpoints, storage scopes, run metadata schema, and result types. |
 | Helper Functions | Provides Fabric, OneLake, Delta write, upsert, and bronze-read helpers. |
 | Core Decomposition and Reassembly Logic | Resolves schemas, identifies column shapes, decomposes records, builds child tables, and reassembles wide outputs. |
 | Pipeline Functions | Processes one or more kinds and records run metadata. |
-| Setup checklist | Resolves wildcard kind selectors, validates tenant configuration, first-kind bronze access, schema registry access, output table names, and planned output tables without writing Silver Layer tables. |
+| Setup checklist | Resolves wildcard kind selectors, validates tenant configuration, first-kind bronze access, ADME schema service access with a one-row schema-list probe, output table names, and planned output tables without writing Silver Layer tables. |
 | Smoke test bronze access | Reads at most one row for the first configured kind without writing Silver Layer tables. |
 | Run Pipeline | Prints next steps when `interactive`, previews writes when `dry_run`, or executes when `full`. |
 | Results Summary | Displays the per-kind result table. |
@@ -210,10 +220,10 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Keep `DROP_WKT = True` unless WKT geometry columns are required by a downstream consumer.
 - Use `TABLE_PREFIX` to isolate test outputs from production Silver Layer tables.
 - Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
-- Keep `PERSIST_SCHEMA_CACHE = True` for repeatability when the public OSDU schema registry is unavailable or changes unexpectedly. Dry runs can read the cache, but only full runs write new cache rows.
-- Ensure the runtime can reach the OSDU schema registry before the first run or when cache misses occur.
+- Keep `PERSIST_SCHEMA_CACHE = True` for repeatability when the ADME schema service is temporarily unavailable. Dry runs can read the cache, but only full runs write new cache rows.
+- Ensure the runtime can reach the ADME endpoint, retrieve the service principal secret from Key Vault when using `SP`, acquire a token for `ADME_TOKEN_SCOPE`, and list schemas before the first run or when cache misses occur.
 - Keep `CACHE_BRONZE = True`, `PREFLIGHT_KIND_COUNTS = True`, and `SCHEMA_PREFLIGHT = True` for large wildcard runs to reduce repeated bronze scans and schema lookups.
-- Keep `BATCH_METADATA_WRITES = True` for broad runs. Metadata is flushed periodically and at the end, so completed output tables remain durable while reducing small Delta commits.
+- Keep `BATCH_METADATA_WRITES = True` for broad runs. Metadata and output documentation are flushed periodically and at the end, so completed output tables remain durable while reducing small Delta commits.
 - Use `OUTPUT_DOCS_MODE = "summary"` for broad runs. Switch to `full` only when column-level generated documentation is required.
 - Review `silver_run_info` after each scheduled run to confirm per-kind status and record counts.
 - Review `silver_run_manifest` to onboard downstream consumers to the generated tables.
@@ -225,8 +235,9 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | --- | --- |
 | Bronze table not found | Confirm the lakehouse is attached, or set `ADME_WORKSPACE_ID`, `ADME_LAKEHOUSE_ID`, and `ADME_BRONZE_TABLE`. |
 | No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
-| Schema load fails | Confirm the runtime can access the OSDU schema registry URL and that the kind URN is valid. |
-| Private/custom schemas are skipped | Add schemas to the persisted schema cache or use `MISSING_SCHEMA_MODE = "infer"` for best-effort output. |
+| ADME schema access fails | Confirm `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID`, `ADME_AUTH_METHOD`, and `ADME_TENANT_ID` are set. For `SP`, confirm `ADME_SP_CLIENT_ID`, `ADME_SP_SECRET_KV_NAME`, and `ADME_SP_SECRET_NAME` are set and the notebook can read the Key Vault secret. Confirm the service principal can list schemas in the configured data partition. |
+| Schema load fails | Confirm the runtime can reach the ADME endpoint, MSAL can get a token for the configured scope, and the kind URN exists in the ADME schema service. |
+| Private/custom schemas are skipped | Confirm the schema is registered in the ADME data partition and the configured service principal or device-code user is authorized to read it, or use `MISSING_SCHEMA_MODE = "infer"` for best-effort output. |
 | Multiple versions collide | Use the default `VERSION_STRATEGY = "merge"` or switch to `versioned_tables` for physical separation. |
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |

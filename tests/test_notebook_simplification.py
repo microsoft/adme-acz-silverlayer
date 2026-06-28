@@ -4,6 +4,8 @@ import os
 import re
 import unittest
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,8 +71,30 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
     namespace: dict[str, object] = {
         "json": json,
         "os": os,
+        "quote": quote,
         "re": re,
-        "WEB_RAW_ROOT": "https://community.opengroup.org/osdu/data/data-definitions/-/raw/master/",
+        "ADME_SCHEMA_SERVICE_PATH": "/api/schema-service/v1/schema",
+        "ADME_TOKEN_SCOPE": "https://management.core.windows.net/.default",
+        "ADME_DEVICE_CODE_CLIENT_ID": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+        "Any": Any,
+        "_JSON_SCHEMA_MARKER_KEYS": {
+            "$schema",
+            "$id",
+            "allOf",
+            "anyOf",
+            "definitions",
+            "oneOf",
+            "properties",
+            "type",
+            "x-osdu-schema-source",
+        },
+        "adme_endpoint": "https://contoso.energy.azure.com",
+        "adme_data_partition_id": "data",
+        "adme_auth_method": "SP",
+        "adme_tenant_id": "11111111-1111-1111-1111-111111111111",
+        "adme_sp_client_id": "22222222-2222-2222-2222-222222222222",
+        "adme_sp_secret_kv_name": "contoso-kv",
+        "adme_sp_secret_name": "adme-sp-secret",
         "MERGE_KEY_COLUMNS": ["id", "version"],
     }
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
@@ -112,6 +136,22 @@ class NotebookSimplificationTests(unittest.TestCase):
             'WORKSPACE_ID = ""',
             'LAKEHOUSE_ID = ""',
             'BRONZE_TABLE = "osducatalog"',
+            'ADME_ENDPOINT = ""',
+            'ADME_DATA_PARTITION_ID = ""',
+            'ADME_AUTH_METHOD = "SP"',
+            'ADME_TENANT_ID = ""',
+            'ADME_SP_CLIENT_ID = ""',
+            'ADME_SP_SECRET_KV_NAME = ""',
+            'ADME_SP_SECRET_NAME = ""',
+            'ADME_TOKEN_SCOPE = "https://management.core.windows.net/.default"',
+            'ADME_DEVICE_CODE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"',
+            'os.environ.get("ADME_ENDPOINT")',
+            'os.environ.get("ADME_DATA_PARTITION_ID")',
+            'os.environ.get("ADME_AUTH_METHOD")',
+            'os.environ.get("ADME_TENANT_ID")',
+            'os.environ.get("ADME_SP_CLIENT_ID")',
+            'os.environ.get("ADME_SP_SECRET_KV_NAME")',
+            'os.environ.get("ADME_SP_SECRET_NAME")',
             'NOTEBOOK_VERSION = "0.2.0"',
             "ALLOW_OVERWRITE = False",
             'MERGE_KEY_COLUMNS = ["id", "version"]',
@@ -135,16 +175,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             'VERSION_STRATEGY = "merge"',
             'MISSING_SCHEMA_MODE = "skip"',
             "CREATE_EMPTY_CHILD_TABLES = True",
-            "PUBLIC_SCHEMA_AUTHORITY_FALLBACK = True",
             "ADME_VERSION_STRATEGY",
             "ADME_MISSING_SCHEMA_MODE",
             "ADME_CREATE_EMPTY_CHILD_TABLES",
-            "ADME_PUBLIC_SCHEMA_AUTHORITY_FALLBACK",
             "CACHE_BRONZE = True",
             'BRONZE_CACHE_STORAGE_LEVEL = "MEMORY_AND_DISK"',
             "PREFLIGHT_KIND_COUNTS = True",
             "BATCH_METADATA_WRITES = True",
-            "METADATA_FLUSH_INTERVAL = 25",
+            "METADATA_FLUSH_INTERVAL = 100",
             'OUTPUT_DOCS_MODE = "summary"',
             "SCHEMA_PREFLIGHT = True",
             "ADME_CACHE_BRONZE",
@@ -180,6 +218,8 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def compute_kind_counts(",
             "def prefetch_schema_registry(",
             "def flush_metadata_buffers(",
+            "def flush_output_documentation_rows(",
+            "def load_schema_docs(",
             "def run_info_row(",
             "def run_manifest_row(",
             "def kind_family_key(",
@@ -187,9 +227,24 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def group_kinds_by_version_strategy(",
             "def detect_table_collisions(",
             "def process_kind_group(",
-            "def _schema_url_candidates(",
+            "ConfidentialClientApplication",
+            "PublicClientApplication",
+            "def _adme_keyvault_url(",
+            "def _adme_service_principal_secret(",
+            "def get_adme_access_token(",
+            "def _adme_schema_url(",
+            "def _adme_schema_list_url(",
+            "def _adme_schema_headers(",
+            "def validate_adme_schema_service_access(",
+            "def build_registry_from_adme(",
+            "def _load_schema_docs_from_persistent_cache(",
+            "def _write_schema_docs_to_persistent_cache(",
+            "validate_adme_schema_service_access()",
+            'timings["schema_access_check"]',
             "def write_run_manifest(",
             "def write_output_documentation(",
+            "def output_documentation_rows(",
+            "def _buffer_or_write_output_documentation(",
             "def validate_table_names(",
             "def _assert_overwrite_allowed(",
             "RUN_MANIFEST_SCHEMA",
@@ -208,17 +263,22 @@ class NotebookSimplificationTests(unittest.TestCase):
             "silver_output_documentation",
             "Timing summary",
             "metadata_flush",
+            "output_docs_flush",
         ]:
             self.assertIn(expected, source)
 
     def test_performance_resilience_controls_are_present(self) -> None:
         source = notebook_source(self.nb, "code")
         self.assertIn("flush_metadata_buffers(spark, run_info_rows, manifest_rows, workspace_id, lakehouse_id)", source)
+        self.assertIn("flush_output_documentation_rows(spark, output_docs_rows, workspace_id, lakehouse_id)", source)
         self.assertIn("finally:", source)
         self.assertIn("bronze_df.unpersist()", source)
         self.assertIn("_table_exists(spark, name, refresh=True)", source)
         self.assertIn("_TABLE_EXISTS_CACHE[target] = True", source)
         self.assertIn('docs_mode == "summary"', source)
+        self.assertIn('timings["output_docs_flush"]', source)
+        self.assertIn('if children and not globals().get("create_empty_child_tables", True):', source)
+        self.assertIn("_write_schema_docs_to_persistent_cache(cache_rows)", source)
 
     def test_full_run_receives_overwrite_and_metadata_arguments(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -236,6 +296,7 @@ class NotebookSimplificationTests(unittest.TestCase):
 
     def test_no_hardcoded_environment_ids_or_driver_collected_changed_ids(self) -> None:
         raw = NOTEBOOK.read_text(encoding="utf-8")
+        raw = raw.replace("04b07795-8ddb-461a-bbee-02f9e1bf7b46", "")
         self.assertIsNone(
             re.search(
                 r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
@@ -363,12 +424,116 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertEqual(len(group(kinds, "versioned_tables")), 2)
         self.assertTrue(collisions(kinds, "", "merge")[0]["safe"])
 
-    def test_schema_url_candidates_include_osdu_fallback(self) -> None:
-        funcs = extract_functions(self.nb, ["parse_kind", "source_folder_for_kind", "_schema_url_candidates"])
-        candidates = funcs["_schema_url_candidates"]("data:wks:dataset--File.Generic:1.0.0")
-        urls = [url for url, _ in candidates]
-        self.assertTrue(any("/data/dataset/File.Generic.1.0.0.json" in url for url in urls))
-        self.assertTrue(any("/osdu/dataset/File.Generic.1.0.0.json" in url for url in urls))
+    def test_adme_schema_url_uses_configured_endpoint(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_adme_schema_config",
+                "_adme_auth_method",
+                "_adme_keyvault_url",
+                "_schema_doc_cache_key",
+                "_adme_schema_url",
+                "_adme_schema_list_url",
+                "_adme_schema_source_prefix",
+                "_adme_schema_source",
+            ],
+        )
+        self.assertEqual(
+            funcs["_adme_schema_config"](),
+            (
+                "https://contoso.energy.azure.com",
+                "data",
+                "https://management.core.windows.net/.default",
+            ),
+        )
+        self.assertEqual(funcs["_adme_auth_method"](), "SP")
+        self.assertEqual(funcs["_adme_keyvault_url"]("contoso-kv"), "https://contoso-kv.vault.azure.net/")
+        self.assertEqual(
+            funcs["_adme_keyvault_url"]("https://contoso-kv.vault.azure.net/"),
+            "https://contoso-kv.vault.azure.net/",
+        )
+        self.assertEqual(
+            funcs["_adme_schema_url"]("osdu:wks:reference-data--DurationContext:1.0.0"),
+            "https://contoso.energy.azure.com/api/schema-service/v1/schema/osdu:wks:reference-data--DurationContext:1.0.0",
+        )
+        self.assertEqual(
+            funcs["_adme_schema_list_url"](),
+            "https://contoso.energy.azure.com/api/schema-service/v1/schema?latestVersion=False&limit=1",
+        )
+        self.assertEqual(
+            funcs["_adme_schema_list_url"](0),
+            "https://contoso.energy.azure.com/api/schema-service/v1/schema?latestVersion=False&limit=1",
+        )
+        self.assertEqual(
+            funcs["_schema_doc_cache_key"]("osdu:wks:reference-data--DurationContext:1.0.0"),
+            (
+                "https://contoso.energy.azure.com",
+                "data",
+                "osdu:wks:reference-data--DurationContext:1.0.0",
+            ),
+        )
+        self.assertEqual(
+            funcs["_adme_schema_source_prefix"](),
+            "adme:endpoint=https://contoso.energy.azure.com;partition=data;",
+        )
+        self.assertEqual(
+            funcs["_adme_schema_source"](
+                "https://contoso.energy.azure.com/api/schema-service/v1/schema/osdu:wks:reference-data--DurationContext:1.0.0"
+            ),
+            "adme:endpoint=https://contoso.energy.azure.com;partition=data;url=https://contoso.energy.azure.com/api/schema-service/v1/schema/osdu:wks:reference-data--DurationContext:1.0.0",
+        )
+
+        funcs["_adme_schema_config"].__globals__["ADME_TOKEN_SCOPE"] = ""
+        with self.assertRaises(ValueError):
+            funcs["_adme_schema_config"]()
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "DC"
+        self.assertEqual(funcs["_adme_auth_method"](), "DC")
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "invalid"
+        with self.assertRaises(ValueError):
+            funcs["_adme_auth_method"]()
+
+    def test_adme_schema_response_unwrapping(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_looks_like_json_schema",
+                "_coerce_schema_body",
+                "_extract_adme_schema_doc",
+            ],
+        )
+        schema_doc = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {"Name": {"type": "string"}},
+                }
+            },
+        }
+        extract = funcs["_extract_adme_schema_doc"]
+
+        self.assertTrue(funcs["_looks_like_json_schema"](schema_doc))
+        self.assertIs(extract(schema_doc, "osdu:wks:reference-data--DurationContext:1.0.0"), schema_doc)
+        self.assertEqual(
+            extract(
+                {
+                    "schemaInfo": {"schemaIdentity": {"id": "osdu:wks:reference-data--DurationContext:1.0.0"}},
+                    "schema": schema_doc,
+                },
+                "osdu:wks:reference-data--DurationContext:1.0.0",
+            ),
+            schema_doc,
+        )
+        self.assertEqual(
+            extract(
+                {"schema": json.dumps(schema_doc)},
+                "osdu:wks:reference-data--DurationContext:1.0.0",
+            ),
+            schema_doc,
+        )
+        with self.assertRaises(ValueError):
+            extract({"schemaInfo": {"schemaIdentity": {"id": "bad"}}}, "bad")
 
 
 if __name__ == "__main__":
