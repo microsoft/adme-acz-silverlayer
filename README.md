@@ -67,7 +67,7 @@ Most customers only need the settings in this section. The remaining notebook se
 | Decision | Settings | Guidance |
 | --- | --- | --- |
 | Fabric target | `WORKSPACE_ID`, `LAKEHOUSE_ID` | Leave both blank when the Fabric lakehouse is attached. Set them only for scheduled or detached runs that need explicit OneLake resolution. |
-| Bronze source | `BRONZE_TABLE` | ACZ bronze Delta table containing OSDU records. Default is `osducatalog`. |
+| Bronze source | `BRONZE_TABLE` | ACZ bronze Delta table containing OSDU records. Default is `osducatalog`. Inactive rows are excluded by default using the bronze `isActive` column. |
 | ADME schema service | `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID` | Required for schema lookup. Use the customer ADME endpoint and OSDU data partition id. |
 | Authentication | `ADME_AUTH_METHOD`, `ADME_TENANT_ID`, `ADME_SP_CLIENT_ID`, `ADME_SP_SECRET_KV_NAME`, `ADME_SP_SECRET_NAME` | Use `SP` for direct notebook runs with a Key Vault stored client secret. Use `DC` only for interactive validation. Managed identity is preferred for production orchestration when supported by the runner. |
 | Scope | `KINDS`, `LIMIT`, `KIND_LIMITS` | Start with one or two explicit kinds and a small limit. Widen to wildcard or all-kinds selections after the dry run is clean. |
@@ -101,17 +101,20 @@ ALLOW_OVERWRITE = False
 
 Environment variables can override the same settings for scheduled execution. Use environment overrides for automation; edit the notebook values for first-time interactive onboarding.
 
+By default, Silver Layer processing transforms only bronze rows where `isActive == true`; rows where `isActive` is `false` or `null` are excluded. Set the advanced `INCLUDE_INACTIVE_RECORDS = True` control, or `ADME_INCLUDE_INACTIVE_RECORDS=true`, only when inactive records should also be transformed.
+
 ## When to use advanced settings
 
 Leave advanced settings at their defaults unless one of these needs applies.
 
 | Need | Settings | Default guidance |
 | --- | --- | --- |
-| Scheduled incremental refresh | `WRITE_MODE`, `MERGE_KEY_COLUMNS`, `INCREMENTAL_WATERMARK_COLUMN`, `INCREMENTAL_WATERMARK_MODE`, `INCREMENTAL_STATE_TABLE` | Start with full refresh. Use `WRITE_MODE = "upsert"` only when the merge key and source-change watermark are understood. |
-| Multiple schema versions | `VERSION_STRATEGY` | Keep `merge` to union versions into one logical table. Use `versioned_tables` only when consumers require physical separation by schema version. |
+| Include inactive bronze records | `INCLUDE_INACTIVE_RECORDS` | Keep `False` so only `isActive == true` records are transformed. Set `True` only when inactive records should be included. |
+| Scheduled incremental refresh | `WRITE_MODE`, `MERGE_KEY_COLUMNS`, `INCREMENTAL_WATERMARK_COLUMN`, `INCREMENTAL_WATERMARK_MODE`, `INCREMENTAL_STATE_TABLE` | Start with `WRITE_MODE = "full_refresh"`. Use `WRITE_MODE = "upsert"` only when the merge key and source-change watermark are understood. |
+| Multiple schema versions | `VERSION_STRATEGY` | Keep `versioned_tables` for physical separation by schema version. Use `merge` only when consumers want one logical table across versions. |
 | Missing private schemas | `MISSING_SCHEMA_MODE` | Keep `skip` for schema-correct outputs that continue past unresolved kinds. Use `fail` when missing schemas should stop the run. |
 | Stable child-table contracts | `CREATE_EMPTY_CHILD_TABLES` | Keep enabled when downstream consumers expect schema-defined child tables even when the current batch has no rows. |
-| Geometry columns | `DROP_WKT` | Keep enabled unless downstream consumers require WKT geometry columns. |
+| Geometry columns | `DROP_WKT` | Leave disabled unless downstream consumers want WKT geometry columns removed. |
 | Schema repeatability | `PERSIST_SCHEMA_CACHE`, `SCHEMA_CACHE_TABLE` | Keep enabled so full runs persist resolved schemas and later runs can tolerate transient schema-service misses. |
 | Metadata and documentation | `RUN_MANIFEST_TABLE`, `WRITE_OUTPUT_DOCS`, `OUTPUT_DOCS_MODE`, `OUTPUT_DOCS_TABLE` | Keep manifest enabled. Use `OUTPUT_DOCS_MODE = "summary"` for broad runs and `full` only when column-level generated documentation is required. |
 | Large wildcard runs | `CACHE_BRONZE`, `PREFLIGHT_KIND_COUNTS`, `BATCH_METADATA_WRITES`, `METADATA_FLUSH_INTERVAL`, `SCHEMA_PREFLIGHT` | Keep defaults for broad runs to reduce repeated bronze scans, schema lookups, and small Delta commits. |
@@ -119,7 +122,7 @@ Leave advanced settings at their defaults unless one of these needs applies.
 
 `ADME_TOKEN_SCOPE = "https://management.core.windows.net/.default"` and `ADME_DEVICE_CODE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"` are static authentication constants in the notebook, not customer-specific tenant settings.
 
-`ADME_REASSEMBLE` is still accepted as a compatibility alias for older scheduled runs when `ADME_OUTPUT_MODE` is not set.
+`ADME_INCREMENTAL` and `ADME_REASSEMBLE` are still accepted as compatibility aliases for older scheduled runs. Prefer `ADME_WRITE_MODE` and `ADME_OUTPUT_MODE` for new runs.
 
 ## Selecting kinds
 
@@ -146,9 +149,9 @@ Normalized output preserves repeated structures as related tables. Wide output e
 
 ## Handle multiple schema versions
 
-The default `VERSION_STRATEGY = "merge"` groups concrete kinds by authority, source, and entity, then unions schema versions into one logical table with nullable columns for fields that only exist in some versions. `schema_version` and `osdu_kind` metadata columns preserve the source version.
+The default `VERSION_STRATEGY = "versioned_tables"` keeps schema versions physically separate. Versioned mode writes tables such as `organisation__v1_2_0`.
 
-Use `VERSION_STRATEGY = "versioned_tables"` when consumers require physical separation by schema version. Versioned mode writes tables such as `organisation__v1_2_0`.
+Use `VERSION_STRATEGY = "merge"` when consumers prefer one logical table across schema versions. Merge mode groups concrete kinds by authority, source, and entity, then unions schema versions into one table with nullable columns for fields that only exist in some versions. `schema_version` and `osdu_kind` metadata columns preserve the source version.
 
 When schemas cannot be resolved from the configured ADME schema service, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. The notebook does not fall back to the public OSDU data-definitions repository.
 
@@ -190,7 +193,7 @@ After a successful run, review:
 - The parent or reassembled table for each selected kind.
 - Generated child tables when `OUTPUT_MODE = "normalized"`.
 - `silver_run_info` for run status, record counts, failures, schema access details, watermark settings, and stage timings.
-- `silver_run_manifest` for produced table names, output mode, write mode, schema versions, row counts, config hash, and status.
+- `silver_run_manifest` for produced table names, output mode, write mode, schema versions, row counts, config hash, active-record filter behavior, and status.
 - `silver_schema_cache` when persisted schema caching is enabled.
 - `silver_incremental_state` when watermark-based source filtering is enabled.
 - `silver_output_documentation` for generated table and column documentation.
@@ -229,12 +232,13 @@ For large wildcard or all-kinds runs, expect cost and runtime to be driven by br
 | Symptom | What to check |
 | --- | --- |
 | Bronze table not found | Confirm the lakehouse is attached, or set `WORKSPACE_ID`, `LAKEHOUSE_ID`, and `BRONZE_TABLE`. |
-| No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
+| Active-record filter fails | Confirm the bronze table has an `isActive` boolean column, or set `INCLUDE_INACTIVE_RECORDS = True` only if inactive records should be transformed. |
+| No records processed | Confirm the selected `KINDS` values match active `kind` values in the bronze table. If only inactive rows exist for a kind, set `INCLUDE_INACTIVE_RECORDS = True` only when those rows should be transformed. |
 | ADME schema access fails | Confirm `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID`, `ADME_AUTH_METHOD`, and `ADME_TENANT_ID` are set. For `SP`, confirm `ADME_SP_CLIENT_ID`, `ADME_SP_SECRET_KV_NAME`, and `ADME_SP_SECRET_NAME` are set and the notebook can read the Key Vault secret. |
 | Schema load fails | Confirm the runtime can reach the ADME endpoint, MSAL can get a token, and the kind URN exists in the ADME schema service. Review retry settings and schema access details in `silver_run_info`. |
 | Schema calls are throttled | Increase retry total or backoff, reduce the number of selected kinds, or keep persisted schema cache enabled. |
 | Private/custom schemas are skipped | Confirm the schema is registered in the ADME data partition and the configured identity is authorized to read it, or use `MISSING_SCHEMA_MODE = "infer"` for best-effort output. |
-| Multiple versions collide | Use the default `VERSION_STRATEGY = "merge"` or switch to `versioned_tables` for physical separation. |
+| Multiple versions collide | Keep `VERSION_STRATEGY = "versioned_tables"` for physical separation, or use `merge` only when one table across versions is intended. |
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
 | Upsert merge fails | Fix the Delta merge error and rerun. The notebook does not fall back to overwrite when an existing Delta target fails to merge. |

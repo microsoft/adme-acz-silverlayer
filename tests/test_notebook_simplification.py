@@ -158,8 +158,9 @@ class NotebookSimplificationTests(unittest.TestCase):
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
             "ADME_ALLOW_OVERWRITE",
-            'WRITE_MODE = ""',
+            'WRITE_MODE = "full_refresh"',
             "ADME_WRITE_MODE",
+            "ADME_INCREMENTAL",
             'INCREMENTAL_WATERMARK_COLUMN = ""',
             'INCREMENTAL_WATERMARK_MODE = "auto"',
             'INCREMENTAL_STATE_TABLE = "silver_incremental_state"',
@@ -181,7 +182,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
             "ADME_WRITE_OUTPUT_DOCS",
             "ADME_OUTPUT_DOCS_TABLE",
-            'VERSION_STRATEGY = "merge"',
+            'VERSION_STRATEGY = "versioned_tables"',
             'MISSING_SCHEMA_MODE = "skip"',
             "CREATE_EMPTY_CHILD_TABLES = True",
             "ADME_VERSION_STRATEGY",
@@ -203,6 +204,26 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_SCHEMA_RETRY_TOTAL = 3",
             "ADME_SCHEMA_RETRY_BACKOFF_SECONDS = 1.0",
             "ADME_SCHEMA_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]",
+        ]:
+            self.assertIn(expected, source)
+        self.assertNotIn("INCREMENTAL = False", source)
+
+    def test_active_record_filter_controls_are_present(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            "INCLUDE_INACTIVE_RECORDS = False",
+            "ADME_INCLUDE_INACTIVE_RECORDS",
+            'include_inactive_records = _env_bool("ADME_INCLUDE_INACTIVE_RECORDS", INCLUDE_INACTIVE_RECORDS)',
+            '"include_inactive_records": include_inactive_records',
+            "def active_record_filter_status(",
+            "def apply_active_record_filter(",
+            'if "isActive" not in df.columns:',
+            'F.col("isActive") == F.lit(True)',
+            "apply_active_filter: bool = True",
+            "return apply_active_record_filter(df) if apply_active_filter else df",
+            'T.StructField("include_inactive_records", T.BooleanType(), True)',
+            'bool(globals().get("include_inactive_records", False))',
+            '_check_row("active record filter"',
         ]:
             self.assertIn(expected, source)
 
