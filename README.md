@@ -8,12 +8,12 @@ The notebook reads bronze OSDU records from ACZ, unwraps Storage record envelope
 
 | Output | Description | Example |
 | --- | --- | --- |
-| Parent table | One row per OSDU record with scalar and flattened object columns. | `welllog` |
-| Child tables | One table per array field, linked to the parent by `id` and ordered with `ordinal` when available. | `welllog___curves` |
-| Reassembled table | One wide table per kind when `OUTPUT_MODE = "wide"`. | `welllog` |
+| Parent table | One row per OSDU record with scalar and flattened object columns. | `osdu_wks_welllog` |
+| Child tables | One table per array field, linked to the parent by `id` and ordered with `ordinal` when available. | `osdu_wks_welllog___curves` |
+| Reassembled table | One wide table per kind when `OUTPUT_MODE = "wide"`. | `osdu_wks_welllog` |
 | Run metadata and quality issues | Processing status, row counts, timing, output manifest, run commit status, data-quality issues, and optional generated documentation. | `silver_run_info`, `silver_run_status`, `silver_data_quality_issues` |
 
-Child tables use `{parent_table}___{array_field_path}` with the normalized full array field path, which keeps nested array outputs distinct. If `TABLE_PREFIX` is set, the prefix is applied to all generated output table names.
+Parent tables include the normalized kind authority and source, followed by the entity name, for example `osdu_wks_welllog` or `data_wks_file_generic`. Child tables use `{parent_table}___{array_field_path}` with the normalized full array field path, which keeps nested array outputs distinct. If `TABLE_PREFIX` is set, the prefix is applied to all generated output table names.
 
 ## Architecture
 
@@ -150,7 +150,7 @@ Normalized output preserves repeated structures as related tables. Wide output e
 
 ## Handle multiple schema versions
 
-The default `VERSION_STRATEGY = "versioned_tables"` keeps schema versions physically separate. Versioned mode writes tables such as `organisation__v1_2_0`.
+The default `VERSION_STRATEGY = "versioned_tables"` keeps schema versions physically separate. Versioned mode writes tables such as `osdu_wks_organisation__v1_2_0`.
 
 Use `VERSION_STRATEGY = "merge"` when consumers prefer one logical table across schema versions. Merge mode groups concrete kinds by authority, source, and entity, then unions schema versions into one table with nullable columns for fields that only exist in some versions. `schema_version` and `osdu_kind` metadata columns preserve the source version.
 

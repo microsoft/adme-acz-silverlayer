@@ -9,12 +9,15 @@ DATA_PREFIX = "data__"
 
 def kind_to_table_name(kind: str) -> str:
     try:
-        _, _, entity_ver = kind.split(":", 2)
+        authority, source, entity_ver = kind.split(":", 2)
         entity, _ = entity_ver.rsplit(":", 1)
     except ValueError:
-        entity = kind
+        return sanitize_table_name_part(kind)
     entity_base = entity.split("--")[-1]
-    return entity_base.replace("-", "_").replace(".", "_").lower()
+    return "_".join(
+        sanitize_table_name_part(part)
+        for part in (authority, source, entity_base)
+    )
 
 
 def sanitize_table_name_part(value: str) -> str:

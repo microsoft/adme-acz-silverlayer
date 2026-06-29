@@ -163,7 +163,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_SP_CLIENT_ID")',
             'os.environ.get("ADME_SP_SECRET_KV_NAME")',
             'os.environ.get("ADME_SP_SECRET_NAME")',
-            'NOTEBOOK_VERSION = "0.3.0"',
+            'NOTEBOOK_VERSION = "0.4.0"',
             "ALLOW_OVERWRITE = False",
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
@@ -547,11 +547,11 @@ class NotebookSimplificationTests(unittest.TestCase):
         kind_to_table_name = extract_function(self.nb, "kind_to_table_name")
         self.assertEqual(
             kind_to_table_name("osdu:wks:work-product-component--WellLog:1.4.0"),
-            "welllog",
+            "osdu_wks_welllog",
         )
         self.assertEqual(
             kind_to_table_name("osdu:wks:master-data--Well:1.2.0"),
-            "well",
+            "osdu_wks_well",
         )
         self.assertEqual(kind_to_table_name("Custom-Entity.Name"), "custom_entity_name")
 
@@ -712,7 +712,21 @@ class NotebookSimplificationTests(unittest.TestCase):
         ]
         self.assertEqual(family(kinds[0]), "osdu:wks:master-data--Organisation")
         self.assertEqual(version(kinds[1]), "1.2.0")
-        self.assertEqual(versioned(kinds[1]), "organisation__v1_2_0")
+        self.assertEqual(versioned(kinds[1]), "osdu_wks_organisation__v1_2_0")
+        self.assertEqual(
+            versioned("data:wks:dataset--File.Generic:1.0.0"),
+            "data_wks_file_generic__v1_0_0",
+        )
+        self.assertFalse(
+            collisions(
+                [
+                    "data:wks:dataset--File.Generic:1.0.0",
+                    "osdu:wks:dataset--File.Generic:1.0.0",
+                ],
+                "",
+                "versioned_tables",
+            )
+        )
         self.assertEqual(len(group(kinds, "merge")), 1)
         self.assertEqual(len(group(kinds, "versioned_tables")), 2)
         self.assertTrue(collisions(kinds, "", "merge")[0]["safe"])
