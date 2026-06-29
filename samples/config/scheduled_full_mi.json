@@ -1,0 +1,28 @@
+{
+  "description": "Scheduled production-style full run using managed identity authentication.",
+  "settings": {
+    "ADME_AUTH_METHOD": "MI",
+    "ADME_MANAGED_IDENTITY_CLIENT_ID": "",
+    "RUN_PROFILE": "full",
+    "KINDS": [
+      "*:*:*:*"
+    ],
+    "LIMIT": 0,
+    "KIND_LIMITS": {},
+    "WRITE_MODE": "upsert",
+    "MERGE_KEY_COLUMNS": [
+      "id",
+      "version"
+    ],
+    "INCREMENTAL_WATERMARK_COLUMN": "<bronze-watermark-column>",
+    "INCREMENTAL_WATERMARK_MODE": "required",
+    "OUTPUT_MODE": "normalized",
+    "TABLE_PREFIX": "",
+    "ALLOW_OVERWRITE": false,
+    "PERSIST_SCHEMA_CACHE": true,
+    "SCHEMA_PREFLIGHT": true,
+    "SCHEMA_FETCH_PARALLELISM": 4,
+    "DATA_QUALITY_CHECKS": true,
+    "OUTPUT_DOCS_MODE": "summary"
+  }
+}

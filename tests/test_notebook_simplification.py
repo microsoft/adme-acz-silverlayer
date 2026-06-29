@@ -44,7 +44,13 @@ def extract_function(nb: dict, function_name: str):
             if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 module = ast.Module(body=[node], type_ignores=[])
                 ast.fix_missing_locations(module)
-                namespace: dict[str, object] = {"json": json, "os": os, "MERGE_KEY_COLUMNS": ["id", "version"]}
+                namespace: dict[str, object] = {
+                    "json": json,
+                    "os": os,
+                    "Any": Any,
+                    "KindResult": object,
+                    "MERGE_KEY_COLUMNS": ["id", "version"],
+                }
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
     raise AssertionError(f"Function {function_name!r} was not found")
@@ -78,6 +84,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "ADME_TOKEN_SCOPE": "https://management.core.windows.net/.default",
         "ADME_DEVICE_CODE_CLIENT_ID": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
         "Any": Any,
+        "_DATA_PREFIX": "data__",
         "_JSON_SCHEMA_MARKER_KEYS": {
             "$schema",
             "$id",
@@ -96,6 +103,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "adme_sp_client_id": "22222222-2222-2222-2222-222222222222",
         "adme_sp_secret_kv_name": "contoso-kv",
         "adme_sp_secret_name": "adme-sp-secret",
+        "KindResult": object,
         "MERGE_KEY_COLUMNS": ["id", "version"],
     }
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
@@ -140,6 +148,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'ADME_ENDPOINT = ""',
             'ADME_DATA_PARTITION_ID = ""',
             'ADME_AUTH_METHOD = "SP"',
+            'ADME_MANAGED_IDENTITY_CLIENT_ID = ""',
             'ADME_TENANT_ID = ""',
             'ADME_SP_CLIENT_ID = ""',
             'ADME_SP_SECRET_KV_NAME = ""',
@@ -149,6 +158,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_ENDPOINT")',
             'os.environ.get("ADME_DATA_PARTITION_ID")',
             'os.environ.get("ADME_AUTH_METHOD")',
+            'os.environ.get("ADME_MANAGED_IDENTITY_CLIENT_ID")',
             'os.environ.get("ADME_TENANT_ID")',
             'os.environ.get("ADME_SP_CLIENT_ID")',
             'os.environ.get("ADME_SP_SECRET_KV_NAME")',
@@ -171,10 +181,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             "PERSIST_SCHEMA_CACHE = True",
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
             'RUN_MANIFEST_TABLE = "silver_run_manifest"',
+            'RUN_STATUS_TABLE = "silver_run_status"',
             'schema_cache_writes_enabled = persist_schema_cache and run_profile == "full"',
             "ADME_PERSIST_SCHEMA_CACHE",
             "ADME_SCHEMA_CACHE_TABLE",
             "ADME_RUN_MANIFEST_TABLE",
+            "ADME_RUN_STATUS_TABLE",
             "KIND_LIMITS = {}",
             "ADME_KIND_LIMITS",
             "kind_selectors",
@@ -182,6 +194,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
             "ADME_WRITE_OUTPUT_DOCS",
             "ADME_OUTPUT_DOCS_TABLE",
+            "DATA_QUALITY_CHECKS = True",
+            'DATA_QUALITY_ISSUES_TABLE = "silver_data_quality_issues"',
+            "DATA_QUALITY_MAX_EXAMPLES = 100",
+            "ADME_DATA_QUALITY_CHECKS",
+            "ADME_DATA_QUALITY_ISSUES_TABLE",
+            "ADME_DATA_QUALITY_MAX_EXAMPLES",
             'VERSION_STRATEGY = "versioned_tables"',
             'MISSING_SCHEMA_MODE = "skip"',
             "CREATE_EMPTY_CHILD_TABLES = True",
@@ -195,11 +213,15 @@ class NotebookSimplificationTests(unittest.TestCase):
             "METADATA_FLUSH_INTERVAL = 100",
             'OUTPUT_DOCS_MODE = "summary"',
             "SCHEMA_PREFLIGHT = True",
+            "SCHEMA_FETCH_PARALLELISM = 4",
+            "WIDE_MAX_CARDINALITY_CAP = 20",
             "ADME_CACHE_BRONZE",
             "ADME_PREFLIGHT_KIND_COUNTS",
             "ADME_BATCH_METADATA_WRITES",
             "ADME_OUTPUT_DOCS_MODE",
             "ADME_SCHEMA_PREFLIGHT",
+            "ADME_SCHEMA_FETCH_PARALLELISM",
+            "ADME_WIDE_MAX_CARDINALITY_CAP",
             "ADME_SCHEMA_TIMEOUT_SECONDS = 30",
             "ADME_SCHEMA_RETRY_TOTAL = 3",
             "ADME_SCHEMA_RETRY_BACKOFF_SECONDS = 1.0",
@@ -265,6 +287,16 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def group_kinds_by_version_strategy(",
             "def detect_table_collisions(",
             "def process_kind_group(",
+            "def _schema_definitions(",
+            "def _definition_key_from_ref(",
+            "def _first_non_null_json_type(",
+            "def infer_schema_doc_from_bronze_df(",
+            "def build_inferred_registry_from_bronze(",
+            "def _fetch_schema_docs_from_adme(",
+            "def _schema_fetch_parallelism(",
+            "def _wide_max_cardinality_cap(",
+            '"x-osdu-schema-source": "inferred-from-bronze"',
+            'schema_mode = "inferred"',
             "ConfidentialClientApplication",
             "PublicClientApplication",
             "def _adme_keyvault_url(",
@@ -280,13 +312,20 @@ class NotebookSimplificationTests(unittest.TestCase):
             "validate_adme_schema_service_access()",
             'timings["schema_access_check"]',
             "def write_run_manifest(",
+            "def write_run_status(",
+            "def _output_tables_from_results(",
+            "def collect_data_quality_issues(",
+            "def evaluate_and_write_data_quality_issues(",
+            "def write_data_quality_issues(",
             "def write_output_documentation(",
             "def output_documentation_rows(",
             "def _buffer_or_write_output_documentation(",
             "def validate_table_names(",
             "def _assert_overwrite_allowed(",
             "RUN_MANIFEST_SCHEMA",
+            "RUN_STATUS_SCHEMA",
             "SCHEMA_CACHE_SCHEMA",
+            "DATA_QUALITY_ISSUES_SCHEMA",
             "OUTPUT_DOCS_SCHEMA",
             'T.StructField("notebook_version", T.StringType(), True)',
             'T.StructField("config_hash", T.StringType(), True)',
@@ -296,6 +335,8 @@ class NotebookSimplificationTests(unittest.TestCase):
             'T.StructField("stage_timings_json", T.StringType(), True)',
             'T.StructField("watermark_column", T.StringType(), True)',
             'T.StructField("watermark_value", T.StringType(), True)',
+            'T.StructField("quality_status", T.StringType(), True)',
+            'T.StructField("quality_issue_count", T.LongType(), True)',
             'T.StructField("table_role", T.StringType(), False)',
             'T.StructField("column_name", T.StringType(), False)',
             'T.StructField("version_strategy", T.StringType(), True)',
@@ -304,9 +345,13 @@ class NotebookSimplificationTests(unittest.TestCase):
             "_load_schema_doc_from_persistent_cache",
             "_write_schema_doc_to_persistent_cache",
             "silver_output_documentation",
+            "silver_data_quality_issues",
             "Timing summary",
             "metadata_flush",
             "output_docs_flush",
+            "silver_run_status",
+            'final_status = "failed" if failed else "committed"',
+            "outputs are not marked committed",
             "ADME schema retries",
         ]:
             self.assertIn(expected, source)
@@ -326,8 +371,17 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("HTTPAdapter(max_retries=retry)", source)
         self.assertIn("Retry(", source)
         self.assertIn("status_forcelist=_adme_schema_retry_status_codes()", source)
+        self.assertIn("ThreadPoolExecutor(max_workers=parallelism)", source)
+        self.assertIn("as_completed(future_by_kind)", source)
+        self.assertIn("parallelism=%d", source)
+        self.assertIn("effective_cardinality_cap = max_cardinality_cap or _wide_max_cardinality_cap()", source)
         self.assertIn("_adme_schema_get_json(list_url", source)
         self.assertIn("_adme_schema_get_json(schema_url", source)
+        self.assertIn("def validate_incremental_limit_safety(", source)
+        self.assertIn(">= F.lit(previous).cast(data_type)", source)
+        self.assertIn("def validate_build_plan_or_raise(", source)
+        self.assertIn("required_flush_errors.append(message)", source)
+        self.assertIn("Required post-write finalization failed", source)
         self.assertNotIn("requests.get(", source)
 
     def test_full_run_receives_overwrite_and_metadata_arguments(self) -> None:
@@ -432,6 +486,26 @@ class NotebookSimplificationTests(unittest.TestCase):
             "target.`id` = source.`id` AND target.`version` = source.`version`",
         )
 
+    def test_incremental_watermark_limit_guard(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_watermark_active",
+                "validate_incremental_limit_safety",
+            ],
+        )
+        validate_incremental_limit_safety = funcs["validate_incremental_limit_safety"]
+
+        validate_incremental_limit_safety(False, "modifyTime", "auto", 10, {"WellLog": 5})
+        validate_incremental_limit_safety(True, "", "auto", 10, {"WellLog": 5})
+        validate_incremental_limit_safety(True, "modifyTime", "off", 10, {"WellLog": 5})
+        validate_incremental_limit_safety(True, "modifyTime", "auto", None, {})
+
+        with self.assertRaisesRegex(ValueError, "Watermark-based upsert cannot run with LIMIT"):
+            validate_incremental_limit_safety(True, "modifyTime", "auto", 10, {})
+        with self.assertRaisesRegex(ValueError, "Watermark-based upsert cannot run with LIMIT"):
+            validate_incremental_limit_safety(True, "modifyTime", "required", None, {"WellLog": 5})
+
     def test_wildcard_kind_selectors(self) -> None:
         funcs = extract_functions(
             self.nb,
@@ -477,6 +551,137 @@ class NotebookSimplificationTests(unittest.TestCase):
         )
         self.assertEqual(kind_to_table_name("Custom-Entity.Name"), "custom_entity_name")
 
+    def test_child_table_names_use_full_normalized_paths(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_sanitize_table_name_part",
+                "_child_table_suffix",
+                "child_table_name",
+            ],
+        )
+        child_table_name = funcs["child_table_name"]
+        suffix = funcs["_child_table_suffix"]
+
+        self.assertEqual(suffix("data__curves"), "curves")
+        self.assertEqual(suffix("data__LogData__Curves"), "logdata__curves")
+        self.assertEqual(child_table_name("welllog", "data__LogData__Curves"), "welllog___logdata__curves")
+        self.assertNotEqual(
+            child_table_name("welllog", "data__A__items"),
+            child_table_name("welllog", "data__B__items"),
+        )
+
+    def test_nested_property_assignment_for_inferred_schema(self) -> None:
+        assign_nested_property = extract_function(self.nb, "_assign_nested_property")
+        properties: dict[str, Any] = {}
+
+        assign_nested_property(properties, ["LogData", "Curves", "Mnemonic"], {"type": "string"})
+
+        self.assertEqual(
+            properties,
+            {
+                "LogData": {
+                    "type": "object",
+                    "properties": {
+                        "Curves": {
+                            "type": "object",
+                            "properties": {
+                                "Mnemonic": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+
+    def test_json_schema_compatibility_helpers(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_schema_definitions",
+                "_definition_key_from_ref",
+                "_first_non_null_json_type",
+            ],
+        )
+
+        self.assertEqual(
+            funcs["_schema_definitions"](
+                {
+                    "definitions": {"legacy": {"type": "string"}},
+                    "$defs": {"modern": {"type": "integer"}},
+                }
+            ),
+            {
+                "legacy": {"type": "string"},
+                "modern": {"type": "integer"},
+            },
+        )
+        self.assertEqual(funcs["_definition_key_from_ref"]("#/definitions/legacy"), "legacy")
+        self.assertEqual(funcs["_definition_key_from_ref"]("#/$defs/modern"), "modern")
+        self.assertIsNone(funcs["_definition_key_from_ref"]("https://example.invalid/schema.json"))
+        self.assertEqual(funcs["_first_non_null_json_type"](["null", "string"]), "string")
+        self.assertEqual(funcs["_first_non_null_json_type"](["integer", "null"]), "integer")
+
+    def test_data_quality_configuration_helpers(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_data_quality_enabled",
+                "_data_quality_max_examples",
+                "_data_quality_issues_table_name",
+            ],
+        )
+
+        self.assertTrue(funcs["_data_quality_enabled"]())
+        self.assertEqual(funcs["_data_quality_max_examples"](), 100)
+        self.assertEqual(funcs["_data_quality_issues_table_name"](), "silver_data_quality_issues")
+
+        funcs["_data_quality_enabled"].__globals__["data_quality_checks"] = False
+        funcs["_data_quality_max_examples"].__globals__["data_quality_max_examples"] = 0
+        funcs["_data_quality_issues_table_name"].__globals__["data_quality_issues_table"] = "custom_quality"
+
+        self.assertFalse(funcs["_data_quality_enabled"]())
+        self.assertEqual(funcs["_data_quality_max_examples"](), 1)
+        self.assertEqual(funcs["_data_quality_issues_table_name"](), "custom_quality")
+
+    def test_performance_configuration_helpers(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_schema_fetch_parallelism",
+                "_wide_max_cardinality_cap",
+            ],
+        )
+
+        self.assertEqual(funcs["_schema_fetch_parallelism"](), 4)
+        self.assertEqual(funcs["_wide_max_cardinality_cap"](), 20)
+
+        funcs["_schema_fetch_parallelism"].__globals__["schema_fetch_parallelism"] = 8
+        funcs["_wide_max_cardinality_cap"].__globals__["wide_max_cardinality_cap"] = 5
+
+        self.assertEqual(funcs["_schema_fetch_parallelism"](), 8)
+        self.assertEqual(funcs["_wide_max_cardinality_cap"](), 5)
+
+    def test_output_tables_from_results_deduplicates_tables(self) -> None:
+        output_tables_from_results = extract_function(self.nb, "_output_tables_from_results")
+
+        class Result:
+            def __init__(self, parent_table: str, child_tables: list[str] | None = None) -> None:
+                self.parent_table = parent_table
+                self.child_tables = child_tables
+
+        self.assertEqual(
+            output_tables_from_results(
+                [
+                    Result("welllog", ["welllog___curves", "welllog___curves"]),
+                    Result("welllog", ["welllog___parameters"]),
+                ],
+                ["fallback"],
+            ),
+            ["welllog", "welllog___curves", "welllog___parameters"],
+        )
+        self.assertEqual(output_tables_from_results([], ["planned_parent"]), ["planned_parent"])
+
     def test_version_strategy_helpers(self) -> None:
         funcs = extract_functions(
             self.nb,
@@ -514,6 +719,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             [
                 "_adme_schema_config",
                 "_adme_auth_method",
+                "_adme_managed_identity_client_id",
                 "_adme_keyvault_url",
                 "_schema_doc_cache_key",
                 "_adme_schema_url",
@@ -531,6 +737,11 @@ class NotebookSimplificationTests(unittest.TestCase):
             ),
         )
         self.assertEqual(funcs["_adme_auth_method"](), "SP")
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "MI"
+        funcs["_adme_auth_method"].__globals__["adme_managed_identity_client_id"] = "33333333-3333-3333-3333-333333333333"
+        self.assertEqual(funcs["_adme_auth_method"](), "MI")
+        self.assertEqual(funcs["_adme_managed_identity_client_id"](), "33333333-3333-3333-3333-333333333333")
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "SP"
         self.assertEqual(funcs["_adme_keyvault_url"]("contoso-kv"), "https://contoso-kv.vault.azure.net/")
         self.assertEqual(
             funcs["_adme_keyvault_url"]("https://contoso-kv.vault.azure.net/"),
@@ -575,6 +786,41 @@ class NotebookSimplificationTests(unittest.TestCase):
         funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "invalid"
         with self.assertRaises(ValueError):
             funcs["_adme_auth_method"]()
+
+    def test_managed_identity_token_path_does_not_require_tenant(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_adme_schema_config",
+                "_adme_auth_method",
+                "_adme_auth_value",
+                "_adme_authority_url",
+                "_adme_managed_identity_client_id",
+                "_adme_managed_identity_credential",
+                "_acquire_adme_access_token",
+            ],
+        )
+
+        class FakeAccessToken:
+            token = "token-value"
+            expires_on = 1234567890
+
+        class FakeManagedIdentityCredential:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def get_token(self, scope: str):
+                self.scope = scope
+                return FakeAccessToken()
+
+        globals_ = funcs["_acquire_adme_access_token"].__globals__
+        globals_["ManagedIdentityCredential"] = FakeManagedIdentityCredential
+        globals_["DefaultAzureCredential"] = None
+        globals_["adme_auth_method"] = "MI"
+        globals_["adme_tenant_id"] = ""
+        globals_["adme_managed_identity_client_id"] = "33333333-3333-3333-3333-333333333333"
+
+        self.assertEqual(funcs["_acquire_adme_access_token"](), ("token-value", 1234567890))
 
     def test_adme_schema_response_unwrapping(self) -> None:
         funcs = extract_functions(

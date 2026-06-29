@@ -1,0 +1,25 @@
+{
+  "description": "Interactive first-run configuration using service principal authentication.",
+  "settings": {
+    "WORKSPACE_ID": "",
+    "LAKEHOUSE_ID": "",
+    "BRONZE_TABLE": "osducatalog",
+    "ADME_ENDPOINT": "https://<adme-instance>.energy.azure.com",
+    "ADME_DATA_PARTITION_ID": "<data-partition-id>",
+    "ADME_AUTH_METHOD": "SP",
+    "ADME_TENANT_ID": "<tenant-id>",
+    "ADME_SP_CLIENT_ID": "<application-client-id>",
+    "ADME_SP_SECRET_KV_NAME": "<key-vault-name-or-url>",
+    "ADME_SP_SECRET_NAME": "<secret-name>",
+    "ADME_MANAGED_IDENTITY_CLIENT_ID": "",
+    "RUN_PROFILE": "interactive",
+    "KINDS": [
+      "osdu:wks:work-product-component--WellLog:1.4.0"
+    ],
+    "LIMIT": 10,
+    "KIND_LIMITS": {},
+    "OUTPUT_MODE": "normalized",
+    "TABLE_PREFIX": "test_",
+    "ALLOW_OVERWRITE": false
+  }
+}

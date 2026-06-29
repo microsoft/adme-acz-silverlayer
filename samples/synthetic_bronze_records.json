@@ -1,0 +1,20 @@
+[
+  {
+    "id": "sample-welllog-1",
+    "version": "1",
+    "kind": "osdu:wks:work-product-component--WellLog:1.4.0",
+    "isActive": true,
+    "data": "{\"Name\":\"Sample WellLog\",\"Curves\":[{\"Mnemonic\":\"GR\",\"Unit\":\"gAPI\"}],\"SamplingStart\":1000.0}",
+    "tags": "{\"source\":\"synthetic\",\"purpose\":\"notebook-validation\"}",
+    "createTime": "2026-01-01T00:00:00Z"
+  },
+  {
+    "id": "sample-trajectory-1",
+    "version": "1",
+    "kind": "osdu:wks:work-product-component--WellboreTrajectory:1.3.0",
+    "isActive": true,
+    "data": "{\"Name\":\"Sample Trajectory\",\"Stations\":[{\"MD\":1000.0,\"Inclination\":12.5,\"Azimuth\":180.0}]}",
+    "tags": "{\"source\":\"synthetic\",\"purpose\":\"notebook-validation\"}",
+    "createTime": "2026-01-01T00:05:00Z"
+  }
+]

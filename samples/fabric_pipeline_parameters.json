@@ -1,0 +1,22 @@
+{
+  "description": "Generic Fabric pipeline notebook activity parameter values. Replace placeholders before use.",
+  "parameters": {
+    "ADME_WORKSPACE_ID": "<fabric-workspace-id-or-empty-when-attached>",
+    "ADME_LAKEHOUSE_ID": "<fabric-lakehouse-id-or-empty-when-attached>",
+    "ADME_BRONZE_TABLE": "osducatalog",
+    "ADME_ENDPOINT": "https://<adme-instance>.energy.azure.com",
+    "ADME_DATA_PARTITION_ID": "<data-partition-id>",
+    "ADME_AUTH_METHOD": "MI",
+    "ADME_MANAGED_IDENTITY_CLIENT_ID": "",
+    "ADME_RUN_PROFILE": "full",
+    "ADME_KINDS": "*:*:*:*",
+    "ADME_WRITE_MODE": "upsert",
+    "ADME_INCREMENTAL_WATERMARK_COLUMN": "<bronze-watermark-column>",
+    "ADME_INCREMENTAL_WATERMARK_MODE": "required",
+    "ADME_OUTPUT_MODE": "normalized",
+    "ADME_ALLOW_OVERWRITE": "false",
+    "ADME_SCHEMA_FETCH_PARALLELISM": "4",
+    "ADME_DATA_QUALITY_CHECKS": "true",
+    "ADME_OUTPUT_DOCS_MODE": "summary"
+  }
+}
