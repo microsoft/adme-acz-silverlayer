@@ -73,6 +73,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "os": os,
         "quote": quote,
         "re": re,
+        "ADME_SCHEMA_RETRY_STATUS_CODES": [408, 429, 500, 502, 503, 504],
         "ADME_SCHEMA_SERVICE_PATH": "/api/schema-service/v1/schema",
         "ADME_TOKEN_SCOPE": "https://management.core.windows.net/.default",
         "ADME_DEVICE_CODE_CLIENT_ID": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
@@ -157,6 +158,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
             "ADME_ALLOW_OVERWRITE",
+            'WRITE_MODE = ""',
+            "ADME_WRITE_MODE",
+            'INCREMENTAL_WATERMARK_COLUMN = ""',
+            'INCREMENTAL_WATERMARK_MODE = "auto"',
+            'INCREMENTAL_STATE_TABLE = "silver_incremental_state"',
+            "ADME_INCREMENTAL_WATERMARK_COLUMN",
+            "ADME_INCREMENTAL_WATERMARK_MODE",
+            "ADME_INCREMENTAL_STATE_TABLE",
             "config_hash = hashlib.sha256",
             "PERSIST_SCHEMA_CACHE = True",
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
@@ -190,6 +199,10 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_BATCH_METADATA_WRITES",
             "ADME_OUTPUT_DOCS_MODE",
             "ADME_SCHEMA_PREFLIGHT",
+            "ADME_SCHEMA_TIMEOUT_SECONDS = 30",
+            "ADME_SCHEMA_RETRY_TOTAL = 3",
+            "ADME_SCHEMA_RETRY_BACKOFF_SECONDS = 1.0",
+            "ADME_SCHEMA_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504]",
         ]:
             self.assertIn(expected, source)
 
@@ -218,6 +231,10 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def compute_kind_counts(",
             "def prefetch_schema_registry(",
             "def flush_metadata_buffers(",
+            "INCREMENTAL_STATE_SCHEMA",
+            "def load_incremental_watermark_state(",
+            "def apply_incremental_watermark_filter(",
+            "def write_incremental_watermark_state(",
             "def flush_output_documentation_rows(",
             "def load_schema_docs(",
             "def run_info_row(",
@@ -253,6 +270,11 @@ class NotebookSimplificationTests(unittest.TestCase):
             'T.StructField("notebook_version", T.StringType(), True)',
             'T.StructField("config_hash", T.StringType(), True)',
             'T.StructField("allow_overwrite", T.BooleanType(), True)',
+            'T.StructField("duration_seconds", T.DoubleType(), True)',
+            'T.StructField("error_type", T.StringType(), True)',
+            'T.StructField("stage_timings_json", T.StringType(), True)',
+            'T.StructField("watermark_column", T.StringType(), True)',
+            'T.StructField("watermark_value", T.StringType(), True)',
             'T.StructField("table_role", T.StringType(), False)',
             'T.StructField("column_name", T.StringType(), False)',
             'T.StructField("version_strategy", T.StringType(), True)',
@@ -264,6 +286,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "Timing summary",
             "metadata_flush",
             "output_docs_flush",
+            "ADME schema retries",
         ]:
             self.assertIn(expected, source)
 
@@ -279,6 +302,12 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn('timings["output_docs_flush"]', source)
         self.assertIn('if children and not globals().get("create_empty_child_tables", True):', source)
         self.assertIn("_write_schema_docs_to_persistent_cache(cache_rows)", source)
+        self.assertIn("HTTPAdapter(max_retries=retry)", source)
+        self.assertIn("Retry(", source)
+        self.assertIn("status_forcelist=_adme_schema_retry_status_codes()", source)
+        self.assertIn("_adme_schema_get_json(list_url", source)
+        self.assertIn("_adme_schema_get_json(schema_url", source)
+        self.assertNotIn("requests.get(", source)
 
     def test_full_run_receives_overwrite_and_metadata_arguments(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -290,7 +319,11 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("merge_key_columns=merge_key_columns", source)
         self.assertIn("changed_keys_df", source)
         self.assertIn("_merge_condition(\"target\", \"changed\", merge_key_columns)", source)
-        self.assertIn("_align_source_to_target_schema(df, target_df)", source)
+        self.assertIn("def _execute_delta_merge(", source)
+        self.assertIn("not overwriting target table", source)
+        self.assertIn("refusing to overwrite", source)
+        self.assertNotIn("except Exception:\n        _write_table(df, target, mode=\"overwrite\")", source)
+        self.assertIn("_align_source_to_target_schema(source_df, target_df)", source)
         self.assertIn("parent.join(pivoted, on=key_cols", source)
         self.assertIn("parent.join(agg_df, on=key_cols", source)
 
@@ -321,6 +354,36 @@ class NotebookSimplificationTests(unittest.TestCase):
         env_bool = extract_function(self.nb, "_env_bool")
         self.assertTrue(env_bool("MISSING_ENV_VALUE", True))
         self.assertFalse(env_bool("MISSING_ENV_VALUE", False))
+
+    def test_write_mode_and_retry_parsers(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_normalize_write_mode",
+                "_normalize_watermark_mode",
+                "_parse_retry_status_codes",
+            ],
+        )
+        normalize_write_mode = funcs["_normalize_write_mode"]
+        normalize_watermark_mode = funcs["_normalize_watermark_mode"]
+        parse_retry_status_codes = funcs["_parse_retry_status_codes"]
+
+        self.assertEqual(normalize_write_mode("", False), "full_refresh")
+        self.assertEqual(normalize_write_mode("", True), "upsert")
+        self.assertEqual(normalize_write_mode("incremental", False), "upsert")
+        self.assertEqual(normalize_write_mode("overwrite", True), "full_refresh")
+        with self.assertRaises(ValueError):
+            normalize_write_mode("append", False)
+
+        self.assertEqual(normalize_watermark_mode(None), "auto")
+        self.assertEqual(normalize_watermark_mode("required"), "required")
+        with self.assertRaises(ValueError):
+            normalize_watermark_mode("strict")
+
+        self.assertEqual(parse_retry_status_codes("429,500,503"), [429, 500, 503])
+        self.assertEqual(parse_retry_status_codes("[408, 429]"), [408, 429])
+        with self.assertRaises(ValueError):
+            parse_retry_status_codes("99")
 
     def test_kind_limit_parser(self) -> None:
         parse_kind_limits = extract_function(self.nb, "_parse_kind_limits")

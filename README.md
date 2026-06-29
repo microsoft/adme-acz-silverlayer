@@ -62,8 +62,8 @@ Before you run the notebook, make sure the customer environment has:
 - A configured Analytics Consumption Zone. For setup guidance, see [Enable Analytics Consumption Zone](https://learn.microsoft.com/en-us/azure/energy-data-services/how-to-enable-analytics-consumption-zone?tabs=bash).
 - A Microsoft Fabric workspace and lakehouse that can access ACZ bronze Delta tables.
 - Permission to read the bronze table and write Silver Layer Delta tables.
-- A service principal with permission to call the ADME schema service, including listing schemas with `GET /api/schema-service/v1/schema?latestVersion=False&limit=1`.
-- A Key Vault secret containing the service principal client secret, plus notebook permission to read that secret. For interactive testing, device-code authentication is also supported.
+- A production identity that can call the ADME schema service, including listing schemas with `GET /api/schema-service/v1/schema?latestVersion=False&limit=1`. Managed identity through a supported Fabric pipeline or orchestration context is preferred for production runs.
+- For direct notebook runs, a service principal with its client secret stored in Key Vault. Interactive device-code authentication is also supported for testing.
 - A Fabric notebook runtime with a Synapse PySpark kernel.
 - Network access from the runtime to the ADME endpoint, for example `https://contoso.energy.azure.com`.
 
@@ -97,7 +97,7 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `BRONZE_TABLE` | `ADME_BRONZE_TABLE` | `osducatalog` | Bronze Delta table that contains OSDU records. |
 | `ADME_ENDPOINT` | `ADME_ENDPOINT` | Empty string | Required ADME instance endpoint, for example `https://contoso.energy.azure.com`. Trailing slashes are removed. |
 | `ADME_DATA_PARTITION_ID` | `ADME_DATA_PARTITION_ID` | Empty string | Required OSDU data partition id sent as the `data-partition-id` header for schema service calls. |
-| `ADME_AUTH_METHOD` | `ADME_AUTH_METHOD` | `SP` | Authentication mode for ADME schema service calls. Use `SP` for service principal client credentials or `DC` for device-code authentication. |
+| `ADME_AUTH_METHOD` | `ADME_AUTH_METHOD` | `SP` | Authentication mode for direct notebook ADME schema service calls. Use `SP` for service principal client credentials or `DC` for device-code authentication. Managed identity is preferred for production orchestration when supported outside the notebook runtime. |
 | `ADME_TENANT_ID` | `ADME_TENANT_ID` | Empty string | Required Microsoft Entra tenant id for both `SP` and `DC` authentication. |
 | `ADME_SP_CLIENT_ID` | `ADME_SP_CLIENT_ID` | Empty string | Required service principal application client id when `ADME_AUTH_METHOD = "SP"`. |
 | `ADME_SP_SECRET_KV_NAME` | `ADME_SP_SECRET_KV_NAME` | Empty string | Required Key Vault name or URL containing the service principal secret when `ADME_AUTH_METHOD = "SP"`. |
@@ -105,8 +105,12 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `NOTEBOOK_VERSION` | None | `0.2.0` | Notebook implementation version written to run manifest rows. |
 | `RUN_PROFILE` | `ADME_RUN_PROFILE` | `interactive` | Use `interactive` to review settings, `dry_run` to validate and preview planned writes, or `full` to execute the pipeline. |
 | `KINDS` | `ADME_KINDS` | WellLog and WellboreTrajectory examples | OSDU kind URNs, all-kinds markers, or wildcard patterns to process. Environment values are comma-separated. |
-| `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Upsert parent rows and replace child rows for changed parent IDs when `true`; otherwise overwrite output tables. |
+| `INCREMENTAL` | `ADME_INCREMENTAL` | `False` | Compatibility alias. When `true`, selects `WRITE_MODE = "upsert"`. |
+| `WRITE_MODE` | `ADME_WRITE_MODE` | Empty string | Use `full_refresh` to overwrite outputs with explicit overwrite protection, or `upsert` to merge parent/wide rows and replace child rows for processed merge keys. Empty derives from `INCREMENTAL`. |
 | `MERGE_KEY_COLUMNS` | `ADME_MERGE_KEY_COLUMNS` | `["id", "version"]` | Columns used for incremental parent/wide upserts and child replacement. Default preserves multiple OSDU record versions per ID. |
+| `INCREMENTAL_WATERMARK_COLUMN` | `ADME_INCREMENTAL_WATERMARK_COLUMN` | Empty string | Optional bronze column used to filter source rows in upsert mode to values greater than the previous successful watermark for each kind. |
+| `INCREMENTAL_WATERMARK_MODE` | `ADME_INCREMENTAL_WATERMARK_MODE` | `auto` | Use `off`, `auto`, or `required`. `required` fails if the configured watermark column is unavailable. |
+| `INCREMENTAL_STATE_TABLE` | `ADME_INCREMENTAL_STATE_TABLE` | `silver_incremental_state` | Delta table that stores per-kind watermark state for source-change filtering. |
 | `ALLOW_OVERWRITE` | `ADME_ALLOW_OVERWRITE` | `False` | Allow full refresh to replace existing output tables. Keep disabled for first runs in a new tenant. |
 | `LIMIT` | `ADME_LIMIT` | `0` | Maximum records per kind. `0` means no limit. |
 | `KIND_LIMITS` | `ADME_KIND_LIMITS` | Empty object | Optional per-kind limits keyed by full kind, table name, or entity name, for example `{"WellLog": 100}`. Environment values can be JSON or `key=value` pairs. |
@@ -128,6 +132,10 @@ The notebook is designed to run in a new tenant or workspace by editing one expl
 | `BATCH_METADATA_WRITES` | `ADME_BATCH_METADATA_WRITES` | `True` | Buffer `silver_run_info`, `silver_run_manifest`, and output documentation rows and write them in batches. |
 | `METADATA_FLUSH_INTERVAL` | `ADME_METADATA_FLUSH_INTERVAL` | `100` | Flush metadata and documentation buffers after this many results, plus a final flush at the end or on exceptions. |
 | `SCHEMA_PREFLIGHT` | `ADME_SCHEMA_PREFLIGHT` | `True` | Resolve schemas for all selected kinds before processing groups, falling back to per-kind resolution if preflight fails. |
+| `ADME_SCHEMA_TIMEOUT_SECONDS` | `ADME_SCHEMA_TIMEOUT_SECONDS` | `30` | HTTP timeout for ADME schema service calls. |
+| `ADME_SCHEMA_RETRY_TOTAL` | `ADME_SCHEMA_RETRY_TOTAL` | `3` | Total retry attempts for transient ADME schema service failures. |
+| `ADME_SCHEMA_RETRY_BACKOFF_SECONDS` | `ADME_SCHEMA_RETRY_BACKOFF_SECONDS` | `1.0` | Exponential retry backoff factor for ADME schema service calls. |
+| `ADME_SCHEMA_RETRY_STATUS_CODES` | `ADME_SCHEMA_RETRY_STATUS_CODES` | `[408, 429, 500, 502, 503, 504]` | HTTP status codes treated as transient for schema service retries. |
 | Lakehouse name fallback | `ADME_LAKEHOUSE_NAME` | `osducatalog` | Used only when the notebook must build a OneLake path from a lakehouse name. |
 
 `ADME_REASSEMBLE` is still accepted as a compatibility alias for older scheduled runs when `ADME_OUTPUT_MODE` is not set.
@@ -170,11 +178,19 @@ Use `VERSION_STRATEGY = "versioned_tables"` if you need strict physical separati
 
 When schemas cannot be resolved from the configured ADME schema service, `MISSING_SCHEMA_MODE = "skip"` records a schema-missing result and continues processing later kinds. Use `fail` when schema lookup failures should stop the run. The notebook does not fall back to the public OSDU data-definitions repository.
 
-## Incremental merge keys
+## Authentication guidance
+
+For production scheduling, prefer a managed identity through a supported Fabric pipeline notebook activity connection, workspace identity, or equivalent orchestrator that can run the notebook under an approved identity. Grant that identity only the ADME/OSDU entitlement groups and data-plane permissions required to read schemas and source data.
+
+Direct notebook execution keeps `ADME_AUTH_METHOD = "SP"` as the default because managed identity token acquisition is not assumed inside the interactive Fabric notebook runtime. Store the service principal secret in Key Vault, rotate it regularly, and grant the notebook only secret read access. Use `ADME_AUTH_METHOD = "DC"` only for interactive validation.
+
+## Upsert mode, watermarks, and merge keys
 
 The default `MERGE_KEY_COLUMNS = ["id", "version"]` treats the bronze `version` column as the OSDU record version. This allows multiple versions of the same record `id` to coexist in Silver Layer tables and makes repeated incremental runs idempotent for the same `id + version` pair.
 
-Do not confuse the bronze record `version` column with `schema_version`, which is derived from the kind URN. In incremental mode, parent/wide rows are merged by `MERGE_KEY_COLUMNS`, and child rows are replaced using the same key columns.
+Do not confuse the bronze record `version` column with `schema_version`, which is derived from the kind URN. In `WRITE_MODE = "upsert"`, parent/wide rows are merged by `MERGE_KEY_COLUMNS`, and child rows are replaced using the same key columns.
+
+By default, upsert mode processes all selected bronze rows and makes the writes idempotent. To filter source rows, configure `INCREMENTAL_WATERMARK_COLUMN` to a reliable bronze timestamp, version, or monotonically increasing field. The notebook stores per-kind state in `silver_incremental_state` and processes rows greater than the previous successful watermark. Use `INCREMENTAL_WATERMARK_MODE = "required"` when source filtering must be active; otherwise `auto` falls back to processing all selected rows if no usable watermark is configured.
 
 ## Run the pipeline
 
@@ -199,9 +215,10 @@ After a successful run, review:
 
 - The parent or reassembled table for each selected kind.
 - Generated child tables when `OUTPUT_MODE = "normalized"`.
-- `silver_run_info` for run status, record counts, failures, and error messages.
-- `silver_run_manifest` for per-kind output mode, version strategy, schema version, schema mode, notebook version, config hash, parent table, child tables, row counts, status, and table prefix.
+- `silver_run_info` for run status, record counts, failures, error type, duration, write mode, output mode, merge keys, schema access detail, watermark settings, and stage timings.
+- `silver_run_manifest` for per-kind output mode, write mode, version strategy, schema version, schema mode, notebook version, config hash, parent table, child tables, row counts, status, table prefix, output docs mode, cache settings, and watermark settings.
 - `silver_schema_cache` when persisted schema caching is enabled.
+- `silver_incremental_state` when watermark-based source filtering is enabled.
 - `silver_output_documentation` for generated table and column documentation, including table role, source column, column order, and data type.
 - The Results Summary cell for a quick per-kind view of status, rows, output table name, child count, validation, and error text.
 
@@ -211,7 +228,8 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 
 - Use full refresh for initial loads, schema changes, and troubleshooting.
 - Keep `ALLOW_OVERWRITE = False` until a dry run confirms the planned tables. Set it to `True` only when full refresh should replace existing outputs.
-- Use incremental mode only when the bronze source and downstream consumers can tolerate upsert behavior for parent tables and child table replacement for changed parent merge keys. The default merge key is `id + version`.
+- Use `WRITE_MODE = "upsert"` only when the bronze source and downstream consumers can tolerate merge behavior for parent tables and child table replacement for processed parent merge keys. The default merge key is `id + version`.
+- Use `INCREMENTAL_WATERMARK_COLUMN` only with a reliable bronze field. Set `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows.
 - Use `LIMIT` for smoke tests before processing full OSDU kinds.
 - Use `KIND_LIMITS` to onboard large tenants one kind at a time without changing the global default limit.
 - Keep `VERSION_STRATEGY = "merge"` for broad all-kinds runs unless downstream consumers require physically separate tables per schema version.
@@ -222,12 +240,45 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 - Use `RUN_PROFILE = "dry_run"` before the first full run in a new tenant.
 - Keep `PERSIST_SCHEMA_CACHE = True` for repeatability when the ADME schema service is temporarily unavailable. Dry runs can read the cache, but only full runs write new cache rows.
 - Ensure the runtime can reach the ADME endpoint, retrieve the service principal secret from Key Vault when using `SP`, acquire a token for `ADME_TOKEN_SCOPE`, and list schemas before the first run or when cache misses occur.
+- Keep ADME schema retries enabled for throttling and transient service failures. Tune retry totals and backoff for scheduled runs that process many kinds.
 - Keep `CACHE_BRONZE = True`, `PREFLIGHT_KIND_COUNTS = True`, and `SCHEMA_PREFLIGHT = True` for large wildcard runs to reduce repeated bronze scans and schema lookups.
 - Keep `BATCH_METADATA_WRITES = True` for broad runs. Metadata and output documentation are flushed periodically and at the end, so completed output tables remain durable while reducing small Delta commits.
 - Use `OUTPUT_DOCS_MODE = "summary"` for broad runs. Switch to `full` only when column-level generated documentation is required.
 - Review `silver_run_info` after each scheduled run to confirm per-kind status and record counts.
 - Review `silver_run_manifest` to onboard downstream consumers to the generated tables.
 - Review `silver_output_documentation` for generated table and column details.
+
+## Monitoring and observability
+
+Use `silver_run_info` to monitor per-kind status, duration, error type, schema access details, retry settings, and stage timings. Use `silver_run_manifest` to track which output tables were produced, which write mode and merge keys were used, and whether watermark filtering was configured.
+
+Example checks:
+
+```sql
+SELECT status, COUNT(*) AS kinds, SUM(records_processed) AS rows
+FROM silver_run_info
+GROUP BY status;
+
+SELECT kind, status, error_type, error_message
+FROM silver_run_info
+WHERE status <> 'success';
+
+SELECT kind, parent_table, child_table_count, write_mode, watermark_column, watermark_mode
+FROM silver_run_manifest
+WHERE run_id = '<run-id>';
+```
+
+Review high `duration_seconds` values and `stage_timings_json` to identify expensive phases such as bronze scans, schema preflight, group processing, metadata flush, or output documentation flush.
+
+## Sizing, cost, and performance guidance
+
+For smoke tests and first tenant validation, use `RUN_PROFILE = "dry_run"`, a small `LIMIT`, narrow `KINDS`, a test `TABLE_PREFIX`, and `OUTPUT_DOCS_MODE = "summary"`.
+
+For medium onboarding runs, process one domain or entity family at a time with `KIND_LIMITS`, keep `CACHE_BRONZE = True`, `PREFLIGHT_KIND_COUNTS = True`, `SCHEMA_PREFLIGHT = True`, and review `silver_run_manifest` before widening selection.
+
+For large wildcard or all-kinds runs, expect cost and runtime to be driven by bronze scans, schema lookups, array-heavy child table expansion, wide-table column growth, Delta commits, and output documentation volume. Keep metadata batching enabled, prefer summary output docs, and use normalized output for array-heavy entities unless downstream consumers require a wide table.
+
+Use `WRITE_MODE = "upsert"` with a reliable watermark column for scheduled refreshes that should process only changed source rows. Without a watermark, upsert mode still scans and processes all selected rows, although writes remain idempotent for the configured merge keys.
 
 ## Troubleshooting
 
@@ -236,14 +287,17 @@ If a kind has no matching bronze records, the run returns `skipped` for that kin
 | Bronze table not found | Confirm the lakehouse is attached, or set `ADME_WORKSPACE_ID`, `ADME_LAKEHOUSE_ID`, and `ADME_BRONZE_TABLE`. |
 | No records processed | Confirm the selected `KINDS` values match the `kind` values in the bronze table. |
 | ADME schema access fails | Confirm `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID`, `ADME_AUTH_METHOD`, and `ADME_TENANT_ID` are set. For `SP`, confirm `ADME_SP_CLIENT_ID`, `ADME_SP_SECRET_KV_NAME`, and `ADME_SP_SECRET_NAME` are set and the notebook can read the Key Vault secret. Confirm the service principal can list schemas in the configured data partition. |
-| Schema load fails | Confirm the runtime can reach the ADME endpoint, MSAL can get a token for the configured scope, and the kind URN exists in the ADME schema service. |
+| Schema load fails | Confirm the runtime can reach the ADME endpoint, MSAL can get a token for the configured scope, and the kind URN exists in the ADME schema service. Review retry settings and schema access details in `silver_run_info`. |
+| Schema calls are throttled | Increase `ADME_SCHEMA_RETRY_TOTAL` or `ADME_SCHEMA_RETRY_BACKOFF_SECONDS`, reduce the number of selected kinds, or keep persisted schema cache enabled. |
 | Private/custom schemas are skipped | Confirm the schema is registered in the ADME data partition and the configured service principal or device-code user is authorized to read it, or use `MISSING_SCHEMA_MODE = "infer"` for best-effort output. |
 | Multiple versions collide | Use the default `VERSION_STRATEGY = "merge"` or switch to `versioned_tables` for physical separation. |
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
+| Upsert merge fails | Fix the Delta merge error and rerun. The notebook does not fall back to overwrite when an existing Delta target fails to merge. |
+| Watermark filtering is not active | Confirm `WRITE_MODE = "upsert"`, set `INCREMENTAL_WATERMARK_COLUMN`, verify the column exists in bronze, and use `INCREMENTAL_WATERMARK_MODE = "required"` if fallback processing should fail. |
 | Table name validation fails | Update `TABLE_PREFIX`, cache table, or manifest table names to use only letters, numbers, and underscores, starting with a letter or underscore. |
 | Output documentation was not written | Confirm `WRITE_OUTPUT_DOCS = True` and that the run reached table write steps for the selected kind. |
-| Output tables are overwritten unexpectedly | Check that `INCREMENTAL` is set correctly before running with `RUN_PROFILE = "full"`. |
+| Output tables are overwritten unexpectedly | Check `WRITE_MODE`, `ADME_WRITE_MODE`, `INCREMENTAL`, and `ALLOW_OVERWRITE` before running with `RUN_PROFILE = "full"`. |
 | Output table shape is too normalized | Use `OUTPUT_MODE = "wide"` to create one wide table per selected kind. |
 | Results Summary is empty | Confirm the Run Pipeline section executed and that `RUN_PROFILE` was set to `dry_run` or `full`. |
 
