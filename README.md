@@ -2,7 +2,7 @@
 
 Use the Azure Data Manager for Energy (ADME) Analytics Consumption Zone (ACZ) Silver Layer notebook to turn nested OSDU records into reusable Delta tables for analytics, reporting, and downstream data engineering.
 
-The notebook reads bronze OSDU records from ACZ, resolves schemas from the ADME schema service, flattens nested JSON, and writes Silver Layer Delta outputs into Microsoft Fabric or OneLake.
+The notebook reads bronze OSDU records from ACZ, unwraps Storage record envelopes in the bronze `data` payload, resolves schemas from the ADME schema service, flattens nested JSON, and writes Silver Layer Delta outputs into Microsoft Fabric or OneLake.
 
 ## What the notebook creates
 
