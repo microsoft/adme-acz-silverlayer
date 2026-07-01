@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+try:
+    from pyspark.sql import types as SparkTypes
+except ImportError:  # pragma: no cover - local notebook helper tests can run without PySpark.
+    SparkTypes = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK = ROOT / "ADME ACZ Silver Layer.ipynb"
@@ -54,6 +59,8 @@ def extract_function(nb: dict, function_name: str):
                     "MERGE_KEY_COLUMNS": ["id", "version"],
                     "_DELTA_COLUMN_PART_RE": re.compile(r"[^0-9A-Za-z_]+"),
                 }
+                if SparkTypes is not None:
+                    namespace["T"] = SparkTypes
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
     raise AssertionError(f"Function {function_name!r} was not found")
@@ -111,6 +118,8 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "MERGE_KEY_COLUMNS": ["id", "version"],
         "_DELTA_COLUMN_PART_RE": re.compile(r"[^0-9A-Za-z_]+"),
     }
+    if SparkTypes is not None:
+        namespace["T"] = SparkTypes
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
     return {name: namespace[name] for name in function_names}
 
@@ -318,6 +327,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def _schema_definitions(",
             "def _definition_key_from_ref(",
             "def _first_non_null_json_type(",
+            "def _dedupe_case_insensitive_struct_type(",
             "def infer_schema_doc_from_bronze_df(",
             "def build_inferred_registry_from_bronze(",
             "def _fetch_schema_docs_from_adme(",
@@ -650,6 +660,62 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIsNone(funcs["_definition_key_from_ref"]("https://example.invalid/schema.json"))
         self.assertEqual(funcs["_first_non_null_json_type"](["null", "string"]), "string")
         self.assertEqual(funcs["_first_non_null_json_type"](["integer", "null"]), "integer")
+
+    @unittest.skipIf(SparkTypes is None, "PySpark is not installed")
+    def test_case_insensitive_struct_fields_are_deduplicated(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            [
+                "_with_struct_field_type",
+                "_merge_struct_fields",
+                "_dedupe_case_insensitive_struct_type",
+                "_merge_struct_types",
+                "_merge_schemas",
+            ],
+        )
+        T = SparkTypes
+        registry_schema = T.StructType(
+            [
+                T.StructField("Description", T.StringType(), True),
+                T.StructField(
+                    "Nested",
+                    T.StructType([T.StructField("Name", T.StringType(), True)]),
+                    True,
+                ),
+            ]
+        )
+        inferred_schema = T.StructType(
+            [
+                T.StructField("description", T.StringType(), True),
+                T.StructField(
+                    "Nested",
+                    T.StructType(
+                        [
+                            T.StructField("name", T.StringType(), True),
+                            T.StructField("Value", T.IntegerType(), True),
+                        ]
+                    ),
+                    True,
+                ),
+            ]
+        )
+
+        merged = funcs["_merge_schemas"](registry_schema, inferred_schema)
+
+        self.assertEqual([field.name for field in merged.fields], ["Description", "Nested"])
+        nested = merged["Nested"].dataType
+        self.assertEqual([field.name for field in nested.fields], ["Name", "Value"])
+
+        array_schema = T.ArrayType(
+            T.StructType(
+                [
+                    T.StructField("Description", T.StringType(), True),
+                    T.StructField("description", T.IntegerType(), True),
+                ]
+            )
+        )
+        deduped_array = funcs["_dedupe_case_insensitive_struct_type"](array_schema)
+        self.assertEqual([field.name for field in deduped_array.elementType.fields], ["Description"])
 
     def test_data_quality_configuration_helpers(self) -> None:
         funcs = extract_functions(
