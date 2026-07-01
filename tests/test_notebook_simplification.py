@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 import os
 import re
@@ -45,11 +46,13 @@ def extract_function(nb: dict, function_name: str):
                 module = ast.Module(body=[node], type_ignores=[])
                 ast.fix_missing_locations(module)
                 namespace: dict[str, object] = {
+                    "hashlib": hashlib,
                     "json": json,
                     "os": os,
                     "Any": Any,
                     "KindResult": object,
                     "MERGE_KEY_COLUMNS": ["id", "version"],
+                    "_DELTA_COLUMN_PART_RE": re.compile(r"[^0-9A-Za-z_]+"),
                 }
                 exec(compile(module, filename=f"<{function_name}>", mode="exec"), namespace)
                 return namespace[function_name]
@@ -75,6 +78,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)
     namespace: dict[str, object] = {
+        "hashlib": hashlib,
         "json": json,
         "os": os,
         "quote": quote,
@@ -105,6 +109,7 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "adme_sp_secret_name": "adme-sp-secret",
         "KindResult": object,
         "MERGE_KEY_COLUMNS": ["id", "version"],
+        "_DELTA_COLUMN_PART_RE": re.compile(r"[^0-9A-Za-z_]+"),
     }
     exec(compile(module, filename="<notebook-functions>", mode="exec"), namespace)
     return {name: namespace[name] for name in function_names}
@@ -139,6 +144,26 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn('RUN_PROFILE = "interactive"', source)
         self.assertIn('"dry_run"', source)
 
+    def test_delta_column_name_sanitizer_handles_schema_placeholders(self) -> None:
+        funcs = extract_functions(
+            self.nb,
+            ["_sanitize_column_name_part", "sanitize_delta_column_name", "make_delta_column_alias"],
+        )
+        sanitize = funcs["sanitize_delta_column_name"]
+        alias_for = funcs["make_delta_column_alias"]
+
+        self.assertEqual(sanitize("data__(COMPANY: insert comment)"), "data__COMPANY_insert_comment")
+        self.assertEqual(sanitize("123 bad=field"), "field_123_bad_field")
+
+        used: set[str] = set()
+        self.assertEqual(alias_for("data__(COMPANY: insert comment)", used), "data__COMPANY_insert_comment")
+        collision = alias_for("data__COMPANY insert comment", used)
+        self.assertRegex(collision, r"^data__COMPANY_insert_comment_[0-9a-f]{8}$")
+
+        source = notebook_source(self.nb, "code")
+        self.assertIn("assert_delta_safe_column_names(df", source)
+        self.assertIn("_record_stage(\"sanitize_delta_columns\"", source)
+
     def test_explicit_tenant_config_and_repeatability_controls_are_present(self) -> None:
         source = notebook_source(self.nb, "code")
         for expected in [
@@ -163,7 +188,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_SP_CLIENT_ID")',
             'os.environ.get("ADME_SP_SECRET_KV_NAME")',
             'os.environ.get("ADME_SP_SECRET_NAME")',
-            'NOTEBOOK_VERSION = "0.4.0"',
+            'NOTEBOOK_VERSION = "0.5.0"',
             "ALLOW_OVERWRITE = False",
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
