@@ -6,6 +6,7 @@
       "osdu:wks:work-product-component--WellLog:1.4.0",
       "osdu:wks:work-product-component--WellboreTrajectory:1.3.0"
     ],
+    "EXCLUDED_KINDS": [],
     "LIMIT": 25,
     "KIND_LIMITS": {
       "WellLog": 25,

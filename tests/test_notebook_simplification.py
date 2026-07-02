@@ -30,6 +30,19 @@ def notebook_source(nb: dict, cell_type: str | None = None) -> str:
     return "\n".join(parts)
 
 
+def top_level_assignment_value(nb: dict, name: str):
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        tree = ast.parse("".join(cell.get("source", [])))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                return ast.literal_eval(node.value)
+    raise AssertionError(f"Assignment {name!r} was not found")
+
+
 def markdown_headings(nb: dict) -> list[tuple[int, str]]:
     headings: list[tuple[int, str]] = []
     for index, cell in enumerate(nb["cells"]):
@@ -115,6 +128,8 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
         "adme_sp_secret_kv_name": "contoso-kv",
         "adme_sp_secret_name": "adme-sp-secret",
         "KindResult": object,
+        "DataFrame": object,
+        "SparkSession": object,
         "MERGE_KEY_COLUMNS": ["id", "version"],
         "_DELTA_COLUMN_PART_RE": re.compile(r"[^0-9A-Za-z_]+"),
     }
@@ -197,7 +212,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_SP_CLIENT_ID")',
             'os.environ.get("ADME_SP_SECRET_KV_NAME")',
             'os.environ.get("ADME_SP_SECRET_NAME")',
-            'NOTEBOOK_VERSION = "0.5.0"',
+            'NOTEBOOK_VERSION = "0.5.4"',
             "ALLOW_OVERWRITE = False",
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
@@ -205,12 +220,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             'WRITE_MODE = "full_refresh"',
             "ADME_WRITE_MODE",
             "ADME_INCREMENTAL",
-            'INCREMENTAL_WATERMARK_COLUMN = ""',
+            'INCREMENTAL_WATERMARK_COLUMN = "ingestTime"',
             'INCREMENTAL_WATERMARK_MODE = "auto"',
             'INCREMENTAL_STATE_TABLE = "silver_incremental_state"',
+            "RETRY_SKIPPED_SCHEMA_RECORDS = True",
             "ADME_INCREMENTAL_WATERMARK_COLUMN",
             "ADME_INCREMENTAL_WATERMARK_MODE",
             "ADME_INCREMENTAL_STATE_TABLE",
+            "ADME_RETRY_SKIPPED_SCHEMA_RECORDS",
             "config_hash = hashlib.sha256",
             "PERSIST_SCHEMA_CACHE = True",
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
@@ -224,6 +241,9 @@ class NotebookSimplificationTests(unittest.TestCase):
             "KIND_LIMITS = {}",
             "ADME_KIND_LIMITS",
             "kind_selectors",
+            "EXCLUDED_KINDS = []",
+            "ADME_EXCLUDED_KINDS",
+            "excluded_kind_selectors",
             "WRITE_OUTPUT_DOCS = True",
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
             "ADME_WRITE_OUTPUT_DOCS",
@@ -293,14 +313,20 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def is_all_kinds_selector(",
             "def kind_pattern_to_regex(",
             "def matches_kind_selector(",
+            "def _clean_optional_kind_selectors(",
+            "def _filter_excluded_kinds(",
             "def discover_bronze_kinds(",
             "def resolve_kind_selectors(",
+            "def resolve_affected_kind_selectors(",
             "def ensure_resolved_kinds(",
             "def read_bronze_table_spark(",
             "def _normalize_bronze_record_wrapper(",
             'F.get_json_object(F.col("data"), "$.data")',
+            'F.get_json_object(F.col("data"), "$.createUser")',
+            'F.get_json_object(F.col("data"), "$.createTime")',
             "df = _normalize_bronze_record_wrapper(df)",
             "def prepare_bronze_df(",
+            "def apply_inactive_record_filter(",
             "def _merge_condition(",
             "def _assert_no_duplicate_merge_keys(",
             "def _validate_merge_key_columns(",
@@ -313,8 +339,13 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def flush_metadata_buffers(",
             "INCREMENTAL_STATE_SCHEMA",
             "def load_incremental_watermark_state(",
+            "table_name = _metadata_table_name(workspace_id, lakehouse_id, logical_table_name) if workspace_id or lakehouse_id else logical_table_name",
+            "load_incremental_watermark_state(spark, None, watermark_column, workspace_id, lakehouse_id)",
+            "def load_schema_retry_kinds(",
             "def apply_incremental_watermark_filter(",
+            "def apply_incremental_watermark_filter_all_kinds(",
             "def write_incremental_watermark_state(",
+            "def delete_inactive_silver_rows(",
             "def flush_output_documentation_rows(",
             "def load_schema_docs(",
             "def run_info_row(",
@@ -392,8 +423,39 @@ class NotebookSimplificationTests(unittest.TestCase):
             'final_status = "failed" if failed else "committed"',
             "outputs are not marked committed",
             "ADME schema retries",
+            "affected kinds are pruned before schema preflight",
+            "explicit inactive rows hard-delete Silver keys",
+            "inactive rows are included by configuration",
+            "inactive_delete_preview_rows",
+            "No affected bronze rows after ingestTime watermark filtering",
+            "inactive_bronze_df=inactive_bronze_df",
+            "affected_kind_bronze_df = active_bronze_df.unionByName(inactive_bronze_df, allowMissingColumns=True)",
+            'schema_access_detail = "not checked"',
+            "affected_bronze_df = apply_incremental_watermark_filter_all_kinds(",
+            "schema_retry_kinds = load_schema_retry_kinds(",
+            "schema_retry_kinds=schema_retry_kinds",
+            "Retrying prior schema-missing kind",
+            "Schema retry kinds:",
+            "if not _retry_skipped_schema_records() and _watermark_active",
+            "write_incremental_watermark_state(spark, watermark_updates, workspace_id, lakehouse_id)",
+            'timings["changed_bronze_cache"]',
+            "Changed Bronze slice cached",
         ]:
             self.assertIn(expected, source)
+
+    def test_incremental_run_prunes_changed_rows_before_schema_access(self) -> None:
+        source = notebook_source(self.nb, "code")
+
+        retry_kinds_index = source.index("schema_retry_kinds = load_schema_retry_kinds(")
+        changed_slice_index = source.index("affected_bronze_df = apply_incremental_watermark_filter_all_kinds(")
+        kind_pruning_index = source.index("kinds = resolve_affected_kind_selectors(")
+        schema_access_index = source.index("schema_access_detail = validate_adme_schema_service_access()")
+        schema_preflight_index = source.index("schema_registry, schema_status = prefetch_schema_registry(kinds, enabled=True)")
+
+        self.assertLess(retry_kinds_index, changed_slice_index)
+        self.assertLess(changed_slice_index, kind_pruning_index)
+        self.assertLess(kind_pruning_index, schema_access_index)
+        self.assertLess(schema_access_index, schema_preflight_index)
 
     def test_performance_resilience_controls_are_present(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -417,7 +479,14 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("_adme_schema_get_json(list_url", source)
         self.assertIn("_adme_schema_get_json(schema_url", source)
         self.assertIn("def validate_incremental_limit_safety(", source)
-        self.assertIn(">= F.lit(previous).cast(data_type)", source)
+        self.assertIn("> F.lit(previous).cast(data_type)", source)
+        self.assertIn("> F.col(\"__previous_watermark\").cast(data_type)", source)
+        self.assertIn("apply_active_filter=False", source)
+        self.assertIn("apply_active_filter=True", source)
+        self.assertIn("include_inactive_records=False", source)
+        self.assertIn('F.lower(F.col("isActive").cast("string")).isin("false", "0")', source)
+        self.assertIn("if not successful_kinds and inactive_keys_df is None:", source)
+        self.assertIn('schema_mode="inactive_delete"', source)
         self.assertIn("def validate_build_plan_or_raise(", source)
         self.assertIn("required_flush_errors.append(message)", source)
         self.assertIn("Required post-write finalization failed", source)
@@ -499,6 +568,22 @@ class NotebookSimplificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_retry_status_codes("99")
 
+    def test_storage_wrapper_optional_modify_fields_are_envelope_metadata(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            'create_user_col = "__acz_payload_create_user"',
+            'create_time_col = "__acz_payload_create_time"',
+            "F.col(create_user_col).isNotNull()",
+            "F.col(create_time_col).isNotNull()",
+            '("createUser", create_user_col)',
+            '("createTime", create_time_col)',
+        ]:
+            self.assertIn(expected, source)
+
+        envelope_fields = top_level_assignment_value(self.nb, "_ENVELOPE_FIELD_NAMES")
+        for field_name in ["modifyUser", "modifyTime", "modify_user", "modify_time"]:
+            self.assertIn(field_name, envelope_fields)
+
     def test_kind_limit_parser(self) -> None:
         parse_kind_limits = extract_function(self.nb, "_parse_kind_limits")
         self.assertEqual(parse_kind_limits(None), {})
@@ -554,7 +639,12 @@ class NotebookSimplificationTests(unittest.TestCase):
                 "kind_pattern_to_regex",
                 "matches_kind_selector",
                 "_clean_kind_selectors",
+                "_clean_optional_kind_selectors",
+                "_kind_matches_selectors",
+                "_filter_excluded_kinds",
                 "kind_selectors_require_discovery",
+                "resolve_kind_selectors",
+                "resolve_affected_kind_selectors",
             ],
         )
         is_all_kinds_selector = funcs["is_all_kinds_selector"]
@@ -562,10 +652,15 @@ class NotebookSimplificationTests(unittest.TestCase):
         kind_pattern_to_regex = funcs["kind_pattern_to_regex"]
         matches_kind_selector = funcs["matches_kind_selector"]
         clean_kind_selectors = funcs["_clean_kind_selectors"]
+        clean_optional_kind_selectors = funcs["_clean_optional_kind_selectors"]
+        filter_excluded_kinds = funcs["_filter_excluded_kinds"]
         kind_selectors_require_discovery = funcs["kind_selectors_require_discovery"]
+        resolve_kind_selectors = funcs["resolve_kind_selectors"]
+        resolve_affected_kind_selectors = funcs["resolve_affected_kind_selectors"]
 
         welllog = "osdu:wks:work-product-component--WellLog:1.4.0"
         wellbore = "osdu:wks:master-data--Wellbore:1.2.0"
+        reference = "osdu:wks:reference-data--UnitOfMeasure:1.0.0"
 
         self.assertTrue(is_all_kinds_selector("*:*:*:*"))
         self.assertTrue(is_all_kinds_selector("*"))
@@ -575,8 +670,37 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertTrue(matches_kind_selector(welllog, "*:wks:work-product-component--Well*:1.*"))
         self.assertFalse(matches_kind_selector(wellbore, "*:wks:work-product-component--Well*:1.*"))
         self.assertEqual(clean_kind_selectors([" ", welllog, welllog, "all"]), [welllog, "all"])
+        self.assertEqual(clean_optional_kind_selectors([" ", reference, reference]), [reference])
+        self.assertEqual(filter_excluded_kinds([welllog, reference], ["osdu:wks:reference*:*"]), [welllog])
         self.assertTrue(kind_selectors_require_discovery([welllog, "osdu:wks:*:*"]))
         self.assertFalse(kind_selectors_require_discovery([welllog]))
+
+        resolve_kind_selectors.__globals__["discover_bronze_kinds"] = lambda *args, **kwargs: [welllog, wellbore, reference]
+        self.assertEqual(
+            resolve_kind_selectors(["*:*:*:*"], None, "", "", "osducatalog", excluded_selectors=["osdu:wks:reference*:*"]),
+            [welllog, wellbore],
+        )
+        self.assertEqual(
+            resolve_kind_selectors([welllog, reference], None, "", "", "osducatalog", excluded_selectors=["osdu:wks:reference*:*"]),
+            [welllog],
+        )
+
+        resolve_affected_kind_selectors.__globals__["discover_bronze_kinds"] = lambda *args, **kwargs: [welllog]
+        self.assertEqual(
+            resolve_affected_kind_selectors([welllog, wellbore], None, "", "", "osducatalog", object()),
+            [welllog],
+        )
+        self.assertEqual(
+            resolve_affected_kind_selectors(["*:wks:work-product-component--Well*:1.*"], None, "", "", "osducatalog", object()),
+            [welllog],
+        )
+        resolve_affected_kind_selectors.__globals__["discover_bronze_kinds"] = lambda *args, **kwargs: [welllog, reference]
+        self.assertEqual(
+            resolve_affected_kind_selectors(["all"], None, "", "", "osducatalog", object(), excluded_selectors=["osdu:wks:reference*:*"]),
+            [welllog],
+        )
+        resolve_affected_kind_selectors.__globals__["discover_bronze_kinds"] = lambda *args, **kwargs: []
+        self.assertEqual(resolve_affected_kind_selectors(["all"], None, "", "", "osducatalog", object()), [])
 
     def test_kind_to_table_name(self) -> None:
         kind_to_table_name = extract_function(self.nb, "kind_to_table_name")

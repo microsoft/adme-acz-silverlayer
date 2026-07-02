@@ -16,6 +16,7 @@
     "KINDS": [
       "osdu:wks:work-product-component--WellLog:1.4.0"
     ],
+    "EXCLUDED_KINDS": [],
     "LIMIT": 10,
     "KIND_LIMITS": {},
     "OUTPUT_MODE": "normalized",

@@ -70,7 +70,7 @@ Most customers only need the settings in this section. The remaining notebook se
 | Bronze source | `BRONZE_TABLE` | ACZ bronze Delta table containing OSDU records. Default is `osducatalog`. Inactive rows are excluded by default using the bronze `isActive` column. |
 | ADME schema service | `ADME_ENDPOINT`, `ADME_DATA_PARTITION_ID` | Required for schema lookup. Use the customer ADME endpoint and OSDU data partition id. |
 | Authentication | `ADME_AUTH_METHOD`, `ADME_TENANT_ID`, `ADME_SP_CLIENT_ID`, `ADME_SP_SECRET_KV_NAME`, `ADME_SP_SECRET_NAME`, `ADME_MANAGED_IDENTITY_CLIENT_ID` | Use `MI` for production orchestration with the runner's managed identity. Use `SP` for direct notebook runs with a Key Vault stored client secret. Use `DC` only for interactive validation. |
-| Scope | `KINDS`, `LIMIT`, `KIND_LIMITS` | Start with one or two explicit kinds and a small limit. Widen to wildcard or all-kinds selections after the dry run is clean. |
+| Scope | `KINDS`, `EXCLUDED_KINDS`, `LIMIT`, `KIND_LIMITS` | Start with one or two explicit kinds and a small limit. Widen to wildcard or all-kinds selections after the dry run is clean, and use exclusions for kind families that should never be processed. |
 | Output shape | `OUTPUT_MODE` | Use `normalized` for parent and child tables. Use `wide` when consumers need one denormalized table per kind. |
 | Table safety | `TABLE_PREFIX`, `ALLOW_OVERWRITE` | Use a test prefix for onboarding. Keep overwrite disabled until the planned tables have been reviewed. |
 | Run stage | `RUN_PROFILE` | Use `interactive` to review settings, `dry_run` to validate and preview writes, and `full` to execute. |
@@ -93,6 +93,7 @@ ADME_MANAGED_IDENTITY_CLIENT_ID = ""  # optional; set only for user-assigned MI
 
 RUN_PROFILE = "interactive"
 KINDS = ["osdu:wks:work-product-component--WellLog:1.4.0"]
+EXCLUDED_KINDS = []
 LIMIT = 10
 KIND_LIMITS = {}
 OUTPUT_MODE = "normalized"
@@ -111,7 +112,7 @@ Leave advanced settings at their defaults unless one of these needs applies.
 | Need | Settings | Default guidance |
 | --- | --- | --- |
 | Include inactive bronze records | `INCLUDE_INACTIVE_RECORDS` | Keep `False` so only `isActive == true` records are transformed. Set `True` only when inactive records should be included. |
-| Scheduled incremental refresh | `WRITE_MODE`, `MERGE_KEY_COLUMNS`, `INCREMENTAL_WATERMARK_COLUMN`, `INCREMENTAL_WATERMARK_MODE`, `INCREMENTAL_STATE_TABLE` | Start with `WRITE_MODE = "full_refresh"`. Use `WRITE_MODE = "upsert"` only when the merge key and source-change watermark are understood. |
+| Scheduled incremental refresh | `WRITE_MODE`, `MERGE_KEY_COLUMNS`, `INCREMENTAL_WATERMARK_COLUMN`, `INCREMENTAL_WATERMARK_MODE`, `INCREMENTAL_STATE_TABLE` | Start with `WRITE_MODE = "full_refresh"`. For ACZ `osducatalog`, `ingestTime` is the default source-change watermark for `WRITE_MODE = "upsert"`. |
 | Multiple schema versions | `VERSION_STRATEGY` | Keep `versioned_tables` for physical separation by schema version. Use `merge` only when consumers want one logical table across versions. |
 | Missing private schemas | `MISSING_SCHEMA_MODE` | Keep `skip` for schema-correct outputs that continue past unresolved kinds. Use `infer` only when best-effort output is preferred for unresolved private schemas. Use `fail` when missing schemas should stop the run. |
 | Stable child-table contracts | `CREATE_EMPTY_CHILD_TABLES` | Keep enabled when downstream consumers expect schema-defined child tables even when the current batch has no rows. |
@@ -135,6 +136,13 @@ KINDS = ["*:*:*:*"]                                # all kinds in bronze
 KINDS = ["all"]                                    # all kinds in bronze
 KINDS = ["osdu:wks:*:*"]                           # all wks kinds in bronze
 KINDS = ["*:wks:work-product-component--Well*:1.*"]  # matching Well* WPC kinds
+```
+
+Use `EXCLUDED_KINDS` to remove exact kinds or wildcard matches after `KINDS` is expanded. For scheduled runs, set `ADME_EXCLUDED_KINDS` to the same comma-separated selector format:
+
+```python
+KINDS = ["*:*:*:*"]
+EXCLUDED_KINDS = ["osdu:wks:reference*:*"]
 ```
 
 All-kinds and wildcard full runs can create many tables. Use the Setup checklist, `RUN_PROFILE = "dry_run"`, `TABLE_PREFIX`, `LIMIT`, `KIND_LIMITS`, and `ALLOW_OVERWRITE` intentionally before running a large wildcard selection.
@@ -172,9 +180,9 @@ The default `MERGE_KEY_COLUMNS = ["id", "version"]` treats the bronze `version` 
 
 Do not confuse the bronze record `version` column with `schema_version`, which is derived from the kind URN. In `WRITE_MODE = "upsert"`, parent or wide rows are merged by `MERGE_KEY_COLUMNS`, and child rows are replaced using the same key columns.
 
-By default, upsert mode processes all selected bronze rows and makes writes idempotent. To filter source rows, configure `INCREMENTAL_WATERMARK_COLUMN` to a reliable bronze timestamp, version, or monotonically increasing field. Use `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows.
+By default, `INCREMENTAL_WATERMARK_COLUMN = "ingestTime"` uses the ACZ bronze update timestamp to prune incremental upsert runs to affected concrete kinds before schema preflight and group processing. Active changed rows are transformed and upserted; rows explicitly marked `isActive = false` hard-delete matching Silver parent/wide and child rows by `MERGE_KEY_COLUMNS` so the default Silver outputs remain active-only. If `INCLUDE_INACTIVE_RECORDS = True`, inactive rows are included in the transformed Silver outputs instead of being hard-deleted. Use `INCREMENTAL_WATERMARK_MODE = "required"` when a scheduled job must fail rather than process all selected rows if the watermark column is missing.
 
-When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. Watermark filtering intentionally includes rows at the previous maximum watermark value so late-arriving records with the same watermark are reprocessed safely through idempotent upserts.
+When watermark filtering is active, do not set `LIMIT` or `KIND_LIMITS`; the notebook rejects that combination because advancing a persistent watermark after a limited batch can skip unprocessed records. Watermark filtering intentionally includes rows at the previous maximum watermark value so late-arriving records with the same watermark are reprocessed safely through idempotent upserts and deletes.
 
 ## Run the pipeline
 
@@ -284,7 +292,7 @@ Wide output expands struct-array children up to `WIDE_MAX_CARDINALITY_CAP` posit
 | Setup checklist fails | Fix the failed checklist item before running with `RUN_PROFILE = "full"`. |
 | Full refresh is blocked by existing tables | Review the listed tables and set `ALLOW_OVERWRITE = True` only if replacing them is intended. |
 | Upsert merge fails | Fix the Delta merge error and rerun. The notebook does not fall back to overwrite when an existing Delta target fails to merge. |
-| Watermark filtering is not active | Confirm `WRITE_MODE = "upsert"`, set `INCREMENTAL_WATERMARK_COLUMN`, verify the column exists in bronze, and use `INCREMENTAL_WATERMARK_MODE = "required"` if fallback processing should fail. |
+| Watermark filtering is not active | Confirm `WRITE_MODE = "upsert"`, verify `ingestTime` exists in bronze or override `INCREMENTAL_WATERMARK_COLUMN`, and use `INCREMENTAL_WATERMARK_MODE = "required"` if fallback processing should fail. |
 | Watermark upsert refuses to run with limits | Remove `LIMIT` and `KIND_LIMITS`, or set `INCREMENTAL_WATERMARK_MODE = "off"` for bounded test runs that should not advance watermark state. |
 | Outputs are not marked committed | Check `silver_run_status` for the latest row for the run. If the final status is `failed` or no `committed` row exists, treat output tables from that run as partial and review `silver_run_info` for the failing kind or metadata write. |
 | Data-quality issues are reported | Review `silver_data_quality_issues` and the `quality_status` / `quality_issue_count` fields in run metadata. Findings are non-blocking examples capped by `DATA_QUALITY_MAX_EXAMPLES`; fix source data or merge-key configuration when severity is `error`. |

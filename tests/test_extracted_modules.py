@@ -107,6 +107,9 @@ class ExtractedModuleTests(unittest.TestCase):
                 "kind_pattern_to_regex",
                 "matches_kind_selector",
                 "_clean_kind_selectors",
+                "_clean_optional_kind_selectors",
+                "_kind_matches_selectors",
+                "_filter_excluded_kinds",
                 "kind_selectors_require_discovery",
             ]
         )
@@ -127,6 +130,8 @@ class ExtractedModuleTests(unittest.TestCase):
         self.assertEqual(naming.group_kinds_by_version_strategy(kinds, "merge"), funcs["group_kinds_by_version_strategy"](kinds, "merge"))
         self.assertEqual(naming.detect_table_collisions(kinds, "", "merge"), funcs["detect_table_collisions"](kinds, "", "merge"))
         self.assertEqual(naming.clean_kind_selectors([" ", welllog, welllog, "all"]), funcs["_clean_kind_selectors"]([" ", welllog, welllog, "all"]))
+        self.assertEqual(naming.clean_optional_kind_selectors([" ", organisation_v1, organisation_v1]), funcs["_clean_optional_kind_selectors"]([" ", organisation_v1, organisation_v1]))
+        self.assertEqual(naming.filter_excluded_kinds([welllog, organisation_v1], ["osdu:wks:master-data--Organisation:*"]), funcs["_filter_excluded_kinds"]([welllog, organisation_v1], ["osdu:wks:master-data--Organisation:*"]))
         self.assertEqual(naming.kind_selectors_require_discovery([welllog, "osdu:wks:*:*"]), funcs["kind_selectors_require_discovery"]([welllog, "osdu:wks:*:*"]))
         self.assertEqual(naming.matches_kind_selector(welllog, "*:wks:work-product-component--Well*:1.*"), funcs["matches_kind_selector"](welllog, "*:wks:work-product-component--Well*:1.*"))
 

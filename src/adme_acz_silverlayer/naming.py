@@ -149,5 +149,25 @@ def clean_kind_selectors(selectors: list[str]) -> list[str]:
     return list(dict.fromkeys(cleaned))
 
 
+def clean_optional_kind_selectors(selectors: list[str] | str | None) -> list[str]:
+    if selectors in (None, ""):
+        return []
+    raw_selectors = [part.strip() for part in selectors.split(",")] if isinstance(selectors, str) else selectors
+    cleaned = [str(selector).strip() for selector in raw_selectors if str(selector).strip()]
+    return list(dict.fromkeys(cleaned))
+
+
+def filter_excluded_kinds(kinds: list[str], excluded_selectors: list[str] | str | None = None) -> list[str]:
+    resolved = list(dict.fromkeys(kinds))
+    cleaned_excluded = clean_optional_kind_selectors(excluded_selectors)
+    if not cleaned_excluded:
+        return resolved
+    return [
+        kind
+        for kind in resolved
+        if not any(matches_kind_selector(kind, selector) for selector in cleaned_excluded)
+    ]
+
+
 def kind_selectors_require_discovery(selectors: list[str]) -> bool:
     return any(is_kind_pattern(selector) for selector in selectors)
