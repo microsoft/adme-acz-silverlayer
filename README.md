@@ -205,7 +205,7 @@ The notebook is organized into these executable sections:
 
 The customer-facing artifact remains `ADME ACZ Silver Layer.ipynb`. Customer runs in Microsoft Fabric should not need any helper `.py` files deployed beside the notebook.
 
-Reusable helpers live under `src/adme_acz_silverlayer/` so configuration parsing, naming, JSON Schema compatibility behavior, and notebook hygiene can be tested directly outside Fabric. Local development tooling is intentionally separate from the Fabric runtime contract: helper modules make development and tests easier, while the committed notebook stays self-contained for import into Fabric.
+Reusable helpers live under `src/adme_acz_silverlayer/` so configuration parsing, naming, JSON Schema compatibility behavior, Fabric/OneLake boundary behavior, ADME schema URL/auth helpers, bronze filter decisions, and notebook hygiene can be tested directly outside Fabric. Local development tooling is intentionally separate from the Fabric runtime contract: helper modules make development and tests easier, while the committed notebook stays self-contained for import into Fabric.
 
 Use the notebook sync command before committing notebook changes:
 
