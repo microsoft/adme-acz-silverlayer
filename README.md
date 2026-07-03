@@ -203,7 +203,19 @@ The notebook is organized into these executable sections:
 
 ## Development layout
 
-The customer-facing artifact remains `ADME ACZ Silver Layer.ipynb`. Reusable pure helpers are also extracted under `src/adme_acz_silverlayer/` so configuration parsing, naming, and JSON Schema compatibility behavior can be tested directly outside Fabric. The module-sync tests compare those helpers with the notebook definitions to reduce drift while keeping the notebook self-contained for import into Microsoft Fabric.
+The customer-facing artifact remains `ADME ACZ Silver Layer.ipynb`. Customer runs in Microsoft Fabric should not need any helper `.py` files deployed beside the notebook.
+
+Reusable helpers live under `src/adme_acz_silverlayer/` so configuration parsing, naming, JSON Schema compatibility behavior, and notebook hygiene can be tested directly outside Fabric. Local development tooling is intentionally separate from the Fabric runtime contract: helper modules make development and tests easier, while the committed notebook stays self-contained for import into Fabric.
+
+Use the notebook sync command before committing notebook changes:
+
+```powershell
+python scripts\sync_notebook.py --check --summary
+python scripts\sync_notebook.py
+python -m unittest discover -s tests -q
+```
+
+`--check` validates the notebook format, required section order, absence of code-cell outputs, and the self-contained contract that customer notebook code does not import `adme_acz_silverlayer` at runtime. Running without `--check` normalizes removable execution artifacts such as cell outputs and execution counts.
 
 ## Onboarding assets
 

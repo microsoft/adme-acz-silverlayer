@@ -2,6 +2,9 @@
 
 __all__ = [
     "config",
+    "metadata",
     "naming",
+    "notebook_sync",
+    "runtime",
     "schema",
 ]

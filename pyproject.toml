@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adme-acz-silverlayer"
+version = "0.5.4"
+description = "Local development helpers for the ADME ACZ Silver Layer Fabric notebook."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.md" }
+authors = [
+  { name = "Microsoft" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+spark = [
+  "pyspark>=3.4"
+]
+
+[project.scripts]
+adme-acz-sync-notebook = "adme_acz_silverlayer.notebook_sync:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
