@@ -31,12 +31,52 @@ def schema_fetch_parallelism(value: str | int | None = None) -> int:
     return bounded_runtime_int(value, 4)
 
 
+def output_write_parallelism_for_sku(sku_size: str | None) -> int:
+    normalized = str(sku_size or "").strip().upper()
+    if not normalized:
+        return 1
+    if normalized in {"TRIAL", "FTL4"}:
+        return 1
+    if normalized.startswith("P") and normalized[1:].isdigit():
+        size = int(normalized[1:])
+        if size <= 1:
+            return 4
+        if size == 2:
+            return 6
+        return 8
+    if normalized.startswith("F") and normalized[1:].isdigit():
+        size = int(normalized[1:])
+        if size < 16:
+            return 1
+        if size < 32:
+            return 2
+        if size < 64:
+            return 3
+        if size < 128:
+            return 4
+        if size < 256:
+            return 6
+        return 8
+    return 1
+
+
+def output_write_parallelism(value: str | int | None = None, sku_size: str | None = None) -> int:
+    raw_value = "auto" if value in (None, "") else value
+    if str(raw_value).strip().lower() == "auto":
+        return output_write_parallelism_for_sku(sku_size)
+    return bounded_runtime_int(raw_value, 1)
+
+
 def wide_max_cardinality_cap(value: str | int | None = None) -> int:
     return bounded_runtime_int(value, 20)
 
 
 def watermark_active(incremental: bool, watermark_column: str | None, watermark_mode: str | None) -> bool:
     return bool(incremental and watermark_column and (watermark_mode or "auto") != "off")
+
+
+def processing_limits_active(limit: int | None, kind_limits: Mapping[str, int] | None) -> bool:
+    return bool(limit) or any(bool(value) for value in (kind_limits or {}).values())
 
 
 def validate_incremental_limit_safety(

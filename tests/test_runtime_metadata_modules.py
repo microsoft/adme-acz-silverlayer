@@ -53,8 +53,11 @@ class RuntimeMetadataModuleTests(unittest.TestCase):
                 "_effective_merge_key_columns",
                 "_merge_condition",
                 "_schema_fetch_parallelism",
+                "_output_write_parallelism",
+                "_output_write_parallelism_for_sku",
                 "_wide_max_cardinality_cap",
                 "_watermark_active",
+                "_processing_limits_active",
                 "validate_incremental_limit_safety",
                 "_retry_skipped_schema_records",
             ]
@@ -69,9 +72,16 @@ class RuntimeMetadataModuleTests(unittest.TestCase):
 
         self.assertEqual(runtime.merge_condition("target", "source", ["id", "version"]), funcs["_merge_condition"]("target", "source", ["id", "version"]))
         self.assertEqual(runtime.schema_fetch_parallelism(), funcs["_schema_fetch_parallelism"]())
+        self.assertEqual(runtime.output_write_parallelism(), funcs["_output_write_parallelism"]())
+        self.assertEqual(runtime.output_write_parallelism_for_sku("F64"), funcs["_output_write_parallelism_for_sku"]("F64"))
+        self.assertEqual(runtime.output_write_parallelism_for_sku("P2"), funcs["_output_write_parallelism_for_sku"]("P2"))
+        self.assertEqual(runtime.output_write_parallelism_for_sku("F8"), funcs["_output_write_parallelism_for_sku"]("F8"))
         self.assertEqual(runtime.wide_max_cardinality_cap(), funcs["_wide_max_cardinality_cap"]())
         self.assertEqual(runtime.watermark_active(True, "ingestTime", "auto"), funcs["_watermark_active"](True, "ingestTime", "auto"))
         self.assertEqual(runtime.watermark_active(True, "ingestTime", "off"), funcs["_watermark_active"](True, "ingestTime", "off"))
+        self.assertEqual(runtime.processing_limits_active(1, {}), funcs["_processing_limits_active"](1, {}))
+        self.assertEqual(runtime.processing_limits_active(None, {"kind": 5}), funcs["_processing_limits_active"](None, {"kind": 5}))
+        self.assertEqual(runtime.processing_limits_active(None, {"kind": 0}), funcs["_processing_limits_active"](None, {"kind": 0}))
         self.assertEqual(runtime.retry_skipped_schema_records(), funcs["_retry_skipped_schema_records"]())
 
         runtime.validate_incremental_limit_safety(True, "ingestTime", "auto", None, {})

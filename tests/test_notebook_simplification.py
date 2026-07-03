@@ -212,7 +212,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'os.environ.get("ADME_SP_CLIENT_ID")',
             'os.environ.get("ADME_SP_SECRET_KV_NAME")',
             'os.environ.get("ADME_SP_SECRET_NAME")',
-            'NOTEBOOK_VERSION = "0.5.5"',
+            'NOTEBOOK_VERSION = "0.5.6"',
             "ALLOW_OVERWRITE = False",
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
@@ -268,6 +268,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'OUTPUT_DOCS_MODE = "summary"',
             "SCHEMA_PREFLIGHT = True",
             "SCHEMA_FETCH_PARALLELISM = 4",
+            'OUTPUT_WRITE_PARALLELISM = "auto"',
             "WIDE_MAX_CARDINALITY_CAP = 20",
             "ADME_CACHE_BRONZE",
             "ADME_PREFLIGHT_KIND_COUNTS",
@@ -275,6 +276,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "ADME_OUTPUT_DOCS_MODE",
             "ADME_SCHEMA_PREFLIGHT",
             "ADME_SCHEMA_FETCH_PARALLELISM",
+            "ADME_OUTPUT_WRITE_PARALLELISM",
             "ADME_WIDE_MAX_CARDINALITY_CAP",
             "ADME_SCHEMA_TIMEOUT_SECONDS = 30",
             "ADME_SCHEMA_RETRY_TOTAL = 3",
@@ -326,6 +328,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'F.get_json_object(F.col("data"), "$.createTime")',
             "df = _normalize_bronze_record_wrapper(df)",
             "def prepare_bronze_df(",
+            "def write_silver_tables(",
             "def apply_inactive_record_filter(",
             "def _merge_condition(",
             "def _assert_no_duplicate_merge_keys(",
@@ -363,6 +366,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def build_inferred_registry_from_bronze(",
             "def _fetch_schema_docs_from_adme(",
             "def _schema_fetch_parallelism(",
+            "def _output_write_parallelism_for_sku(",
             "def _wide_max_cardinality_cap(",
             "schema = _merge_schemas(schema, inferred)",
             '"x-osdu-schema-source": "inferred-from-bronze"',
@@ -387,6 +391,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def collect_data_quality_issues(",
             "def evaluate_and_write_data_quality_issues(",
             "def write_data_quality_issues(",
+            "def flush_data_quality_issue_rows(",
             "def write_output_documentation(",
             "def output_documentation_rows(",
             "def _buffer_or_write_output_documentation(",
@@ -418,6 +423,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "silver_data_quality_issues",
             "Timing summary",
             "metadata_flush",
+            "data_quality_flush",
             "output_docs_flush",
             "silver_run_status",
             'final_status = "failed" if failed else "committed"',
@@ -475,6 +481,18 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("ThreadPoolExecutor(max_workers=parallelism)", source)
         self.assertIn("as_completed(future_by_kind)", source)
         self.assertIn("parallelism=%d", source)
+        self.assertIn("Output write parallelism:", source)
+        self.assertIn("Fabric SKU:", source)
+        self.assertIn("import sempy.fabric as fabric", source)
+        self.assertIn("fabric.get_sku_size(workspace=workspace_id or None)", source)
+        self.assertIn("Writing %d Silver table(s) with output_write_parallelism=%d", source)
+        self.assertIn("future_by_target = {executor.submit(write_silver_table, df, target, mode): target for df, target in writes}", source)
+        self.assertIn("quality_issue_rows.extend(rows)", source)
+        self.assertIn("flush_data_quality_issue_rows(spark, data_quality_issue_rows, workspace_id, lakehouse_id)", source)
+        self.assertIn("limits_active = _processing_limits_active(limit, kind_limits)", source)
+        self.assertIn('cache_enabled=bool(globals().get("cache_bronze", True)) and not limits_active', source)
+        self.assertIn('not watermark_filter_active and not limits_active', source)
+        self.assertIn("Skipping kind count preflight for limited run", source)
         self.assertIn("effective_cardinality_cap = max_cardinality_cap or _wide_max_cardinality_cap()", source)
         self.assertIn("_adme_schema_get_json(list_url", source)
         self.assertIn("_adme_schema_get_json(schema_url", source)
@@ -868,11 +886,17 @@ class NotebookSimplificationTests(unittest.TestCase):
             self.nb,
             [
                 "_schema_fetch_parallelism",
+                "_output_write_parallelism_for_sku",
                 "_wide_max_cardinality_cap",
             ],
         )
 
         self.assertEqual(funcs["_schema_fetch_parallelism"](), 4)
+        self.assertEqual(funcs["_output_write_parallelism_for_sku"]("F64"), 4)
+        self.assertEqual(funcs["_output_write_parallelism_for_sku"]("F128"), 6)
+        self.assertEqual(funcs["_output_write_parallelism_for_sku"]("F256"), 8)
+        self.assertEqual(funcs["_output_write_parallelism_for_sku"]("P1"), 4)
+        self.assertEqual(funcs["_output_write_parallelism_for_sku"]("FTL4"), 1)
         self.assertEqual(funcs["_wide_max_cardinality_cap"](), 20)
 
         funcs["_schema_fetch_parallelism"].__globals__["schema_fetch_parallelism"] = 8

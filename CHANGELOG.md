@@ -2,6 +2,10 @@
 
 Generated from the repository commit history. Dates are grouped by commit date in reverse chronological order.
 
+## 2026-07-03 (v0.5.6)
+
+- Improved low-row full-run performance by batching data-quality issue writes, adding opt-in parallel Silver output writes, auto-sizing safe write parallelism from the Fabric workspace SKU when available, and bypassing full bronze materialization for limited runs.
+
 ## 2026-07-03 (v0.5.4) (2 commits)
 
 - Refactored the notebook development foundation with local package metadata, notebook sync validation, extracted pure runtime and metadata helpers, and expanded tests while keeping the Fabric notebook self-contained (`0f3cdfe`).
