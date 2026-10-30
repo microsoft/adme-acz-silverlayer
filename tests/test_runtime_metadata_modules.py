@@ -97,6 +97,7 @@ class RuntimeMetadataModuleTests(unittest.TestCase):
                 "_timings_json",
                 "_output_tables_from_results",
                 "_data_quality_enabled",
+                "_parameter_int",
                 "_data_quality_max_examples",
                 "_data_quality_issues_table_name",
             ]
@@ -106,6 +107,18 @@ class RuntimeMetadataModuleTests(unittest.TestCase):
         self.assertEqual(metadata.timings_json(timings), funcs["_timings_json"](timings))
         self.assertEqual(metadata.data_quality_enabled(), funcs["_data_quality_enabled"]())
         self.assertEqual(metadata.data_quality_max_examples(), funcs["_data_quality_max_examples"]())
+        namespace = funcs["_data_quality_max_examples"].__globals__
+        for value in (0, "0", 1, "1", 100):
+            namespace["data_quality_max_examples"] = value
+            self.assertEqual(metadata.data_quality_max_examples(value), funcs["_data_quality_max_examples"]())
+            self.assertEqual(funcs["_data_quality_max_examples"](), int(value))
+        for value in (-1, "-1", True, False, 1.5, "invalid"):
+            namespace["data_quality_max_examples"] = value
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "DATA_QUALITY_MAX_EXAMPLES"):
+                    metadata.data_quality_max_examples(value)
+                with self.assertRaisesRegex(ValueError, "DATA_QUALITY_MAX_EXAMPLES"):
+                    funcs["_data_quality_max_examples"]()
         self.assertEqual(metadata.data_quality_issues_table_name(), funcs["_data_quality_issues_table_name"]())
 
         class Result:

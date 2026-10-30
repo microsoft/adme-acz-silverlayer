@@ -26,6 +26,7 @@ class OnboardingAssetTests(unittest.TestCase):
             self.assertIn("description", payload)
             self.assertIn("settings", payload)
             self.assertIn("RUN_PROFILE", payload["settings"])
+            self.assertTrue(payload["settings"].get("WRITE_RELATIONSHIP_BRIDGES", True))
 
     def test_synthetic_bronze_records_have_required_columns(self) -> None:
         records = json.loads((SAMPLES / "synthetic_bronze_records.json").read_text(encoding="utf-8"))

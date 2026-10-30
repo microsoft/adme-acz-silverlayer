@@ -22,7 +22,7 @@ def load_notebook() -> dict:
 
 def extract_functions(function_names: list[str]) -> dict[str, object]:
     wanted = set(function_names)
-    nodes: list[ast.FunctionDef] = []
+    nodes: list[ast.stmt] = []
     nb = load_notebook()
     for cell in nb["cells"]:
         if cell["cell_type"] != "code":
@@ -31,8 +31,14 @@ def extract_functions(function_names: list[str]) -> dict[str, object]:
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name in wanted:
                 nodes.append(node)
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in {
+                    "_WRITER_GUARD_TABLE", "_PUBLICATION_ATTEMPTS_TABLE", "_OUTPUT_OWNERSHIP_TABLE",
+                } for target in node.targets
+            ):
+                nodes.append(node)
 
-    found = {node.name for node in nodes}
+    found = {node.name for node in nodes if isinstance(node, ast.FunctionDef)}
     missing = wanted - found
     if missing:
         raise AssertionError(f"Function(s) not found: {sorted(missing)}")
@@ -45,6 +51,7 @@ def extract_functions(function_names: list[str]) -> dict[str, object]:
         "ADME_SCHEMA_SERVICE_PATH": "/api/schema-service/v1/schema",
         "FABRIC_STORAGE_SCOPE": "https://storage.azure.com/.default",
         "DataFrame": object,
+        "SparkSession": object,
         "_adme_schema_config": lambda: (
             "https://contoso.energy.azure.com",
             "data",
@@ -72,6 +79,10 @@ class RuntimeBoundaryModuleTests(unittest.TestCase):
         )
         funcs["_table_path_uri"].__globals__["workspace_id"] = "workspace"
         funcs["_table_path_uri"].__globals__["lakehouse_id"] = "lakehouse"
+        funcs["_onelake_table_uri"].__globals__.update({
+            "_fabric_lakehouse_layout": lambda workspace, lakehouse: (None, "onelake.dfs.fabric.microsoft.com"),
+            "_lakehouse_table_path": fabric_io._lakehouse_table_path,
+        })
 
         for message in [
             "No default context found",
@@ -127,6 +138,7 @@ class RuntimeBoundaryModuleTests(unittest.TestCase):
     def test_adme_schema_helpers_match_notebook(self) -> None:
         funcs = extract_functions(
             [
+                "_normalize_adme_auth_method",
                 "_adme_auth_method",
                 "_adme_auth_value",
                 "_adme_authority_url",
@@ -147,6 +159,20 @@ class RuntimeBoundaryModuleTests(unittest.TestCase):
         self.assertEqual(adme_schema.adme_auth_method("sp"), funcs["_adme_auth_method"]())
         funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "MI"
         self.assertEqual(adme_schema.adme_auth_method("MI"), funcs["_adme_auth_method"]())
+        for method in ("SP", "DC", "MI"):
+            funcs["_adme_auth_method"].__globals__["adme_auth_method"] = method
+            self.assertEqual(adme_schema.adme_auth_method(method.lower()), funcs["_adme_auth_method"]())
+            self.assertEqual(method, funcs["_normalize_adme_auth_method"](method.lower()))
+        for method in ("CLI", "invalid"):
+            funcs["_adme_auth_method"].__globals__["adme_auth_method"] = method
+            for validate in (
+                lambda: adme_schema.adme_auth_method(method),
+                lambda: funcs["_normalize_adme_auth_method"](method),
+                funcs["_adme_auth_method"],
+            ):
+                with self.subTest(method=method), self.assertRaisesRegex(ValueError, "ADME_AUTH_METHOD"):
+                    validate()
+        funcs["_adme_auth_method"].__globals__["adme_auth_method"] = "MI"
         with self.assertRaises(ValueError):
             adme_schema.adme_auth_method("invalid")
 

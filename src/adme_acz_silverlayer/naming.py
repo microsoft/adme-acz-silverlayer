@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 DATA_PREFIX = "data__"
@@ -34,8 +35,27 @@ def child_table_suffix(field_path: str) -> str:
     return "__".join(parts) if parts else "items"
 
 
+def child_table_prefix(parent: str) -> str:
+    """Reserve room for a child path character and its hash within 128 characters."""
+    if len(parent) > 106:
+        digest = hashlib.sha256(parent.encode("utf-8")).hexdigest()[:16]
+        parent = f"{parent[:88]}__{digest}"
+    return f"{parent}___"
+
+
 def child_table_name(parent: str, array_field: str) -> str:
-    return f"{parent}___{child_table_suffix(array_field)}"
+    suffix = child_table_suffix(array_field)
+    name = f"{parent}___{suffix}"
+    if len(name) <= 128:
+        return name
+    prefix = child_table_prefix(parent)
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}{suffix[:128 - len(prefix) - 18]}__{digest}"
+
+
+def is_array_child(table_name: str, parent: str) -> bool:
+    prefixes = (f"{parent}___", child_table_prefix(parent))
+    return any(table_name.startswith(prefix) and table_name != prefix for prefix in prefixes)
 
 
 def kind_parts(kind: str) -> dict[str, str]:

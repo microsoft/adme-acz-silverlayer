@@ -6,6 +6,8 @@ import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from .config import _parameter_int
+
 
 def timings_json(timings: dict[str, float]) -> str:
     return json.dumps({name: round(float(elapsed), 3) for name, elapsed in sorted(timings.items())}, sort_keys=True)
@@ -30,7 +32,7 @@ def data_quality_enabled(value: bool | None = None) -> bool:
 
 def data_quality_max_examples(value: str | int | None = None) -> int:
     raw_value = 100 if value in (None, "") else value
-    return max(1, int(raw_value))
+    return _parameter_int(raw_value, "DATA_QUALITY_MAX_EXAMPLES", 0)
 
 
 def data_quality_issues_table_name(value: str | None = None) -> str:

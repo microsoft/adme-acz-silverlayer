@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import json
 import re
@@ -32,6 +33,105 @@ LOCAL_PACKAGE_IMPORT_RE = re.compile(
     r"^\s*(?:from\s+adme_acz_silverlayer\b|import\s+adme_acz_silverlayer\b)",
     re.MULTILINE,
 )
+
+SHARED_SPARK_HELPERS = {
+    "fabric_io": (
+        "_lakehouse_default_schema",
+        "_lakehouse_table_path",
+    ),
+    "config": (
+        "NOTEBOOK_PARAMETER_TYPES",
+        "_parameter_bool",
+        "_parameter_int",
+        "_parameter_value",
+        "resolve_notebook_parameters",
+    ),
+    "spark_schema": (
+        "_JSON_TYPE_MAP",
+        "_resolve_node",
+        "_json_schema_to_spark",
+        "_classify_spark_type",
+        "_parse_osdu_schema",
+        "_with_struct_field_type",
+        "_merge_struct_fields",
+        "_dedupe_case_insensitive_struct_type",
+        "_merge_struct_types",
+        "_merge_schemas",
+    ),
+    "normalization": (
+        "record_key",
+        "_DELTA_COLUMN_PART_RE",
+        "_sanitize_column_name_part",
+        "sanitize_delta_column_name",
+        "make_delta_column_alias",
+        "_quoted_top_level_col",
+        "_nested_field_col",
+        "_flatten_typed_structs",
+        "_flatten_all_struct_columns",
+        "explode_array",
+    ),
+}
+
+
+def synchronize_shared_helpers(notebook: dict[str, Any]) -> dict[str, Any]:
+    """Embed canonical helper definitions without importing the package in Fabric."""
+    definitions: dict[str, str] = {}
+    for module, names in SHARED_SPARK_HELPERS.items():
+        source = Path(__file__).with_name(f"{module}.py").read_text(encoding="utf-8")
+        nodes = {}
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.FunctionDef):
+                nodes[node.name] = node
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                nodes[node.target.id] = node
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        nodes[target.id] = node
+        for name in names:
+            if name not in nodes:
+                raise ValueError(f"Shared helper {name!r} is missing from {module}.py.")
+            definitions[name] = ast.get_source_segment(source, nodes[name]) + "\n"
+
+    synchronized = copy.deepcopy(notebook)
+    locations: dict[str, tuple[int, ast.AST]] = {}
+    for index, cell in enumerate(synchronized.get("cells", [])):
+        if cell.get("cell_type") != "code":
+            continue
+        for node in ast.parse("".join(cell.get("source", []))).body:
+            if isinstance(node, ast.FunctionDef):
+                names = [node.name]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = [node.target.id]
+            elif isinstance(node, ast.Assign):
+                names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            else:
+                continue
+            for name in names:
+                if name in locations and name in definitions:
+                    raise ValueError(f"Shared helper {name!r} occurs more than once in the notebook.")
+                locations[name] = (index, node)
+
+    missing = set(definitions) - set(locations)
+    if missing - {"explode_array"}:
+        raise ValueError(f"Notebook is missing shared helper(s): {', '.join(sorted(missing))}.")
+    edits: dict[int, list[tuple[int, int, str]]] = {}
+    for name, definition in definitions.items():
+        if name in locations:
+            index, node = locations[name]
+            edits.setdefault(index, []).append((node.lineno - 1, node.end_lineno, definition))
+        else:
+            if "_build_child_primitive" not in locations:
+                raise ValueError("Notebook is missing the child-array helper insertion point.")
+            index, anchor = locations["_build_child_primitive"]
+            edits.setdefault(index, []).append((anchor.lineno - 1, anchor.lineno - 1, definition + "\n\n"))
+
+    for index, replacements in edits.items():
+        lines = "".join(synchronized["cells"][index]["source"]).splitlines(keepends=True)
+        for start, end, definition in sorted(replacements, reverse=True):
+            lines[start:end] = definition.splitlines(keepends=True)
+        synchronized["cells"][index]["source"] = lines
+    return synchronized
 
 
 @dataclass(frozen=True)
@@ -138,6 +238,9 @@ def validation_issues(notebook: dict[str, Any]) -> list[str]:
     if LOCAL_PACKAGE_IMPORT_RE.search(code_source):
         issues.append("Customer notebook must not import adme_acz_silverlayer at runtime.")
 
+    if synchronize_shared_helpers(notebook) != notebook:
+        issues.append("Shared Spark helpers differ from the package source; run scripts/sync_notebook.py.")
+
     return issues
 
 
@@ -150,7 +253,7 @@ def validate_notebook(notebook: dict[str, Any]) -> None:
 def sync_notebook(path: str | Path, check: bool = False) -> bool:
     notebook_path = Path(path)
     original = load_notebook(notebook_path)
-    cleaned = clean_notebook(original)
+    cleaned = synchronize_shared_helpers(clean_notebook(original))
     validate_notebook(cleaned)
 
     changed = cleaned != original
@@ -167,7 +270,7 @@ def _format_summary(summary: NotebookSummary) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate and normalize the ADME ACZ Silver Layer notebook.")
+    parser = argparse.ArgumentParser(description="Embed shared helpers and normalize the ADME ACZ Silver Layer notebook.")
     parser.add_argument(
         "notebook",
         nargs="?",

@@ -1,0 +1,62 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Unit tests
+            files: "$(ls test_*.py | grep -Ev '^test_notebook_(.*integration|modes)' | sed 's/\\.py$//')"
+          - name: Notebook run with synthetic data
+            files: test_notebook_integration
+          - name: Notebook run modes (upsert, wide, inference, auth)
+            files: test_notebook_modes
+          - name: Notebook run with TNO data and fake ADME
+            files: test_notebook_tno_integration
+            tno_cache: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Cache Delta jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy-delta-4.2-${{ hashFiles('pyproject.toml') }}
+      - name: Cache TNO downloads
+        if: matrix.tno_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/adme-acz-tno-cache
+          key: tno-${{ hashFiles('tests/tno_bronze.py', 'tests/fake_adme.py') }}
+      - name: Install
+        run: python -m pip install -e ".[integration]"
+      - name: Run tests
+        working-directory: tests
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: python -m unittest ${{ matrix.files }} -q

@@ -1,11 +1,16 @@
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 from urllib.parse import quote
 
 try:
@@ -139,15 +144,371 @@ def extract_functions(nb: dict, function_names: list[str]) -> dict[str, object]:
     return {name: namespace[name] for name in function_names}
 
 
+class TypedArrayExtractionTests(unittest.TestCase):
+    """Exercise notebook extraction decisions with Spark execution boundaries mocked."""
+
+    FEATURES = "data__SpatialLocation__AsIngestedCoordinates__features"
+    CHILD = "osdu_wks_well___spatiallocation__asingestedcoordinates__features"
+
+    def extract_features(self, values: list, create_empty: bool):
+        class StructType:
+            pass
+
+        class StringType:
+            pass
+
+        class ArrayType:
+            def __init__(self, element_type):
+                self.elementType = element_type
+
+        types = SimpleNamespace(
+            DataType=object, StructType=StructType, StringType=StringType, ArrayType=ArrayType,
+        )
+        with mock.patch.dict(globals(), {"SparkTypes": types}):
+            funcs = extract_functions(
+                load_notebook(),
+                [
+                    "_extract_typed_arrays",
+                    "_sanitize_table_name_part",
+                    "_child_table_suffix",
+                    "_child_table_prefix",
+                    "child_table_name",
+                    "_add_child_table",
+                ],
+            )
+
+        parent = mock.Mock(spec=["schema", "columns", "drop"])
+        element_type = StructType()
+        parent.schema = SimpleNamespace(
+            fields=[SimpleNamespace(name=self.FEATURES, dataType=ArrayType(element_type))],
+        )
+        parent.columns = ["id", "version", self.FEATURES]
+        parent.drop.return_value = SimpleNamespace(columns=["id", "version"])
+        child = object()
+        explode = mock.Mock(return_value=child)
+        extract = funcs["_extract_typed_arrays"]
+        extract.__globals__.update(
+            logger=mock.Mock(),
+            create_empty_child_tables=create_empty,
+            _batch_sample_string_arrays=mock.Mock(return_value={}),
+            _batch_sample_array_presence=mock.Mock(
+                return_value={self.FEATURES: any(value is not None and len(value) > 0 for value in values)},
+            ),
+            _explode_typed_array=explode,
+        )
+        children, projected, _ = extract(parent, "osdu_wks_well")
+        return children, projected, parent, child, explode, element_type
+
+    def test_empty_struct_arrays_are_removed_from_parent_and_honor_empty_child_setting(self) -> None:
+        for values in ([None, None], [[], []], [None, []]):
+            for create_empty in (True, False):
+                with self.subTest(values=values, create_empty_child_tables=create_empty):
+                    children, projected, _, child, _, _ = self.extract_features(values, create_empty)
+                    expected_children = {self.CHILD: (self.FEATURES, child)} if create_empty else {}
+                    self.assertEqual(
+                        (projected.columns, children),
+                        (["id", "version"], expected_children),
+                        "Empty struct arrays must not remain on normalized parents; "
+                        "CREATE_EMPTY_CHILD_TABLES controls only empty child publication.",
+                    )
+
+    def test_populated_struct_arrays_are_extracted_for_both_empty_child_settings(self) -> None:
+        for create_empty in (True, False):
+            with self.subTest(create_empty_child_tables=create_empty):
+                children, projected, parent, child, explode, element_type = self.extract_features(
+                    [None, [], [{"type": "Feature"}]], create_empty,
+                )
+                self.assertEqual(projected.columns, ["id", "version"])
+                self.assertEqual(children, {self.CHILD: (self.FEATURES, child)})
+                parent.drop.assert_called_once_with(self.FEATURES)
+                explode.assert_called_once_with(parent, self.FEATURES, element_type, schema_cache=None)
+
+
 class NotebookSimplificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.nb = load_notebook()
+
+    def test_storage_probe_failures_are_not_cached_as_missing_tables(self) -> None:
+        exists = extract_functions(self.nb, ["_table_exists"])["_table_exists"]
+        cache = {}
+        exists.__globals__.update({
+            "_TABLE_EXISTS_CACHE": cache,
+            "_requires_path_fallback": lambda error: False,
+            "_table_path_uri": lambda table: f"file:///unreadable-fixture/{table}",
+        })
+        spark = mock.Mock()
+        spark.catalog.tableExists.return_value = False
+        filesystem = spark._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
+        filesystem.exists.return_value = False
+        delta_table = mock.Mock()
+        modules = {"delta": SimpleNamespace(), "delta.tables": SimpleNamespace(DeltaTable=delta_table)}
+        with mock.patch.dict(sys.modules, modules):
+            for failure in (PermissionError("Denied"), OSError("Storage unavailable")):
+                with self.subTest(failure=type(failure).__name__):
+                    delta_table.isDeltaTable.side_effect = failure
+                    with self.assertRaises((PermissionError, OSError, RuntimeError)):
+                        exists(spark, "owned_table", refresh=True)
+                    self.assertNotIn("owned_table", cache)
+            delta_table.isDeltaTable.side_effect = None
+            delta_table.isDeltaTable.return_value = False
+            self.assertFalse(exists(spark, "absent_table", refresh=True))
+            self.assertIs(cache["absent_table"], False)
+            filesystem.exists.return_value = True
+            with self.assertRaisesRegex(RuntimeError, "refusing initialization"):
+                exists(spark, "non_delta_table", refresh=True)
+            self.assertNotIn("non_delta_table", cache)
+            filesystem.exists.side_effect = PermissionError("Filesystem probe denied")
+            with self.assertRaisesRegex(RuntimeError, "refusing initialization"):
+                exists(spark, "inaccessible_table", refresh=True)
+            self.assertNotIn("inaccessible_table", cache)
+            filesystem.exists.side_effect = None
+            filesystem.exists.return_value = False
+            delta_table.isDeltaTable.return_value = True
+            self.assertTrue(exists(spark, "owned_table", refresh=True))
+            self.assertIs(cache["owned_table"], True)
+
+    def test_writer_guard_fails_closed_on_lost_acquisition_or_invalid_singleton(self) -> None:
+        acquire = extract_functions(self.nb, ["_acquire_writer"])["_acquire_writer"]
+        guard = mock.Mock()
+        guard.toDF.return_value.limit.return_value = guard.toDF.return_value
+        acquire.__globals__.update({
+            "_WRITER_GUARD_TABLE": "silver_writer_guard",
+            "_table_exists": lambda *args, **kwargs: True,
+            "_delta_table_for_target": lambda *args: guard,
+            "F": mock.MagicMock(),
+        })
+        for rows, error in (
+            ([[], []], "singleton"),
+            ([[{"slot": 1, "owner_id": None}, {"slot": 1, "owner_id": None}], []], "singleton"),
+            ([[{"slot": 1, "owner_id": None}], [{"slot": 1, "owner_id": "other-writer"}]], "ownership"),
+        ):
+            with self.subTest(rows=rows):
+                guard.reset_mock()
+                guard.toDF.return_value.collect.side_effect = rows
+                with self.assertRaisesRegex(RuntimeError, error):
+                    acquire(mock.Mock(), "requesting-writer")
+                if error == "singleton":
+                    guard.update.assert_not_called()
+                else:
+                    guard.update.assert_called_once()
+
+    def test_failed_group_does_not_publish_its_preflight_bridge_tables(self) -> None:
+        build = extract_functions(self.nb, ["_run_silver_build_attempt"])["_run_silver_build_attempt"]
+        namespace = build.__globals__
+        kinds = ["example:wks:master-data--Failed:1.0.0", "example:wks:master-data--Ready:1.0.0"]
+        tables = {kinds[0]: "failed__field__target", kinds[1]: "ready__field__target"}
+        groups = [{"group_key": kind, "kinds": [kind]} for kind in kinds]
+        frame = mock.MagicMock()
+        frame.columns = ["id", "version", "kind", "isActive"]
+        frame.select.return_value = frame
+        frame.persist.return_value = frame
+        frame.where.return_value = frame
+        frame.drop.return_value = frame
+        writes = []
+        recorded_results = []
+
+        def result(**values):
+            item = SimpleNamespace(**{
+                "records_processed": 0, "records_failed": 0, "reassembled": False,
+                "child_tables": [], "error": None, "validation_passed": True, **values,
+            })
+            recorded_results.append(item)
+            return item
+
+        def process(_spark, group, *args, **kwargs):
+            kind = group["group_key"]
+            if kind == kinds[0]:
+                raise ValueError("Injected group failure")
+            kwargs["relationship_frames"].append(frame)
+            kwargs["relationship_bridge_tables"].append(tables[kind])
+            return [result(kind=kind, status="success", parent_table="ready", child_tables=[tables[kind]])]
+
+        namespace.update({
+            "perf_counter": lambda: 0, "datetime": datetime, "UTC": timezone.utc,
+            "uuid": SimpleNamespace(uuid4=lambda: "fixture-run"), "logger": mock.Mock(),
+            "traceback": mock.Mock(), "KindResult": result, "F": mock.MagicMock(),
+            "_effective_merge_key_columns": lambda value: value or ["id", "version"],
+            "_watermark_active": lambda *args: False, "_processing_limits_active": lambda *args: False,
+            "_include_inactive_records": lambda: False, "prepare_bronze_df": lambda *args, **kwargs: (frame, False),
+            "_normalize_bronze_record_wrapper": lambda *args: frame,
+            "_validate_record_identities": mock.Mock(),
+            "_validate_existing_bridges": mock.Mock(),
+            "_validated_historical_outputs": lambda *args: [],
+            "apply_active_record_filter": lambda *args, **kwargs: frame,
+            "_resolve_owned_kind_selectors": lambda *args, **kwargs: kinds,
+            "_persist_publication": mock.Mock(), "_record_output_ownership": mock.Mock(),
+            "group_kinds_by_version_strategy": lambda *args: groups,
+            "validate_adme_schema_service_access": lambda: "synthetic",
+            "validate_build_plan_or_raise": lambda *args: ["failed", "ready"],
+            "_assert_overwrite_allowed": mock.Mock(), "write_run_status": mock.Mock(),
+            "preflight_kind_counts": False, "prefetch_schema_registry": lambda *args, **kwargs: (mock.Mock(), {}),
+            "relationship_bridge_tables_for_kind": lambda kind, *args: [tables[kind]],
+            "_metadata_table_names": lambda *args: [], "validate_table_names": mock.Mock(),
+            "read_bronze_table_spark": lambda *args, **kwargs: frame,
+            "_storage_level_from_name": lambda *args: None, "process_kind_group": process,
+            "table_name_for_kind_group": lambda group, prefix: group["group_key"],
+            "run_info_row": lambda *args: (), "run_manifest_row": lambda *args: (),
+            "_union_frames": lambda frames: frame,
+            "write_silver_tables": lambda batch, **kwargs: writes.extend(target for _, target in batch),
+            "_write_scoped_refresh": lambda spark, batch, *args: writes.extend(target for _, target in batch),
+            "_buffer_or_write_output_documentation": mock.Mock(),
+            "write_incremental_watermark_state": mock.Mock(),
+            "flush_metadata_buffers": lambda spark, info, manifest, *args: (info.clear(), manifest.clear()),
+            "_output_tables_from_results": lambda *args: [],
+            "print": lambda *args, **kwargs: None,
+        })
+        with self.assertRaisesRegex(RuntimeError, "kind group.*failed") as failure:
+            build(
+                mock.MagicMock(), kinds, "workspace", "lakehouse", bronze_table="bronze", allow_overwrite=True,
+                publication={"run_id": "fixture-run", "context_id": "fixture-context",
+                             "source_version": 0, "source_path": "file:///fixture-bronze"},
+            )
+        self.assertIn("Attempt fixture-run", str(failure.exception))
+        self.assertIn(f"{kinds[0]}: Injected group failure", str(failure.exception))
+        self.assertEqual(namespace["write_run_status"].call_args.kwargs["error_message"], str(failure.exception))
+        self.assertEqual([item.status for item in recorded_results], ["failed", "success"])
+        self.assertIn("Injected group failure", recorded_results[0].error)
+        self.assertEqual(writes, ["ready__field__target"])
+        namespace["_validate_record_identities"].assert_called_once_with(frame)
+        namespace["_validate_existing_bridges"].assert_any_call(mock.ANY, list(tables.values()))
+
+    def test_historical_ownership_reports_rejected_tables_without_accepting_them(self) -> None:
+        funcs = extract_functions(self.nb, [
+            "_validated_historical_outputs", "_relationship_table_prefix", "_bounded_relationship_name",
+            "_is_relationship_bridge", "validate_table_names", "_is_array_child", "_child_table_prefix",
+        ])
+        validate = funcs["_validated_historical_outputs"]
+        validate.__globals__["_TABLE_NAME_PATTERN"] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        for strategy in ("merge", "versioned_tables"):
+            parent = "osdu_wks_well" + ("__v1_0_0" if strategy == "versioned_tables" else "")
+            bridge_prefix = funcs["_relationship_table_prefix"](parent)
+            allowed = [parent + "___namealiases", bridge_prefix + "facilitytypeid__reference_data_facilitytype"]
+            with self.subTest(strategy=strategy):
+                validate.__globals__["_manifest_child_tables_for_parent"] = lambda *args: allowed
+                self.assertEqual(allowed, validate(None, parent, "workspace", "lakehouse"))
+                rejected = [f"unrelated_table_{i}" for i in range(12)]
+                validate.__globals__["_manifest_child_tables_for_parent"] = lambda *args: allowed + rejected
+                with self.assertRaisesRegex(RuntimeError, "ownership namespace") as failure:
+                    validate(None, parent, "workspace", "lakehouse")
+                message = str(failure.exception)
+                self.assertIn("12 rejected table(s)", message)
+                self.assertIn(repr(rejected[:10]), message)
+                self.assertNotIn("unrelated_table_10", message)
+                self.assertIn(bridge_prefix, message)
+                self.assertIn("silver_run_manifest", message)
+                self.assertIn("silver_output_ownership", message)
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas for results display tests.")
+    def test_results_summary_separates_and_deduplicates_bridges(self) -> None:
+        source = "".join(self.nb["cells"][-1]["source"])
+        bridge = "fixture_well__facility__facilitytype"
+        helpers = extract_functions(self.nb, [
+            "_is_relationship_bridge", "_relationship_table_prefix", "_bounded_relationship_name",
+        ])
+        for wide in (False, True):
+            with self.subTest(wide=wide):
+                displayed = []
+                results = [
+                    SimpleNamespace(
+                        kind=f"osdu:wks:master-data--Well:{version}",
+                        status="success", records_processed=2, parent_table="fixture_well",
+                        child_tables=[bridge, bridge] if wide else ["fixture_well___aliases", bridge, bridge],
+                        reassembled=wide, validation_passed=True, error=None,
+                    )
+                    for version in ("1.0.0", "2.0.0")
+                ]
+                namespace = {
+                    "results": results, "table_prefix": "fixture_",
+                    "display": displayed.append, "print": lambda *args: None,
+                    "_is_relationship_bridge": helpers["_is_relationship_bridge"],
+                }
+                exec(compile(source, "<results-summary>", "exec"), namespace)
+                self.assertEqual(len(displayed), 2)
+                self.assertEqual(displayed[0]["Children"].tolist(), ["wide", "wide"] if wide else [1, 1])
+                self.assertEqual(displayed[0]["Bridges"].tolist(), [1, 1])
+                self.assertEqual(displayed[1].to_dict("records"), [{
+                    "Bridge table": bridge,
+                    "Source kinds": ", ".join(r.kind for r in results),
+                    "Parent tables": "fixture_well",
+                    "Source statuses": "success",
+                }])
+
+    @unittest.skipUnless(importlib.util.find_spec("pandas"), "Install pandas for results display tests.")
+    def test_results_summary_without_bridges_and_without_execution(self) -> None:
+        source = "".join(self.nb["cells"][-1]["source"])
+        result = SimpleNamespace(
+            kind="osdu:wks:master-data--Well:1.0.0",
+            status="skipped", records_processed=0, parent_table="well",
+            child_tables=None, reassembled=False, validation_passed=True, error=None,
+        )
+        for results, dry_run in (([result], []), ([], [{"kind": result.kind}]), ([], [])):
+            with self.subTest(results=bool(results), dry_run=bool(dry_run)):
+                displayed = []
+                namespace = {
+                    "results": results, "table_prefix": "", "dry_run_results": dry_run,
+                    "display": displayed.append, "print": lambda *args: None,
+                }
+                exec(compile(source, "<results-summary>", "exec"), namespace)
+                self.assertEqual(len(displayed), 1 if results or dry_run else 0)
+                self.assertEqual(namespace["bridge_inventory"], {})
+                if results:
+                    self.assertEqual(displayed[0]["Bridges"].tolist(), [0])
+                elif dry_run:
+                    self.assertEqual(displayed[0].to_dict("records"), dry_run)
 
     def test_notebook_structure_is_valid(self) -> None:
         self.assertEqual(self.nb["nbformat"], 4)
         self.assertGreaterEqual(len(self.nb["cells"]), 20)
         self.assertTrue(all(cell["cell_type"] in {"markdown", "code"} for cell in self.nb["cells"]))
         self.assertTrue(all(not cell.get("outputs") for cell in self.nb["cells"] if cell["cell_type"] == "code"))
+
+    def test_implementation_only_cells_are_hidden(self) -> None:
+        utility_sections = {
+            "## Pipeline constants",
+            "## Helper functions",
+            "### Schema service, authentication, and cache helpers",
+            "### Schema registry and child table naming helpers",
+            "### Delta column sanitization and schema inference helpers",
+            "### Envelope extraction, column classification, and child builders",
+            "### JSON flattening and kind decomposition",
+            "### Wide reassembly and output documentation schema helpers",
+            "### Delta table safety, incremental state, and inactive deletes",
+            "### Data-quality and output-documentation write helpers",
+            "### Single-kind processing",
+            "### Kind-group processing",
+            "### Kind grouping, metadata rows, and build-plan validation",
+            "### Kind selector resolution and output preview",
+            "### Setup checklist implementation",
+            "### Dry-run implementation",
+            "### Pipeline execution orchestration",
+        }
+        section = None
+        hidden_cells = []
+        for cell in self.nb["cells"]:
+            if cell["cell_type"] == "markdown":
+                headings = [
+                    line.strip()
+                    for line in "".join(cell.get("source", [])).splitlines()
+                    if line.startswith("#")
+                ]
+                if headings:
+                    section = headings[0]
+                continue
+            if cell["cell_type"] != "code":
+                continue
+            metadata = cell.get("metadata", {})
+            runtime_resolution = "FABRIC RUNTIME RESOLUTION" in "".join(cell.get("source", []))
+            if section in utility_sections or runtime_resolution:
+                self.assertTrue(metadata.get("collapsed"))
+                self.assertTrue(metadata.get("jupyter", {}).get("source_hidden"))
+                if runtime_resolution:
+                    self.assertFalse(metadata.get("jupyter", {}).get("outputs_hidden"))
+                else:
+                    hidden_cells.append(section)
+            else:
+                self.assertFalse(metadata.get("jupyter", {}).get("source_hidden"))
+
+        self.assertEqual(set(hidden_cells), utility_sections)
 
     def test_setup_and_smoke_tests_precede_pipeline_execution(self) -> None:
         heading_positions = dict(markdown_headings(self.nb))
@@ -165,8 +526,27 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("ADME_OUTPUT_MODE", source)
         self.assertIn("ADME_REASSEMBLE", source)
         self.assertIn("Output mode", source)
-        self.assertIn('RUN_PROFILE = "interactive"', source)
+        self.assertIn('RUN_PROFILE = "inspect"', source)
         self.assertIn('"dry_run"', source)
+
+    def test_run_profile_values_are_explicit(self) -> None:
+        source = notebook_source(self.nb, "code")
+        self.assertIn('{"inspect", "dry_run", "execute"}', source)
+        self.assertIn(
+            'raise ValueError("RUN_PROFILE must be \'inspect\', \'dry_run\', or \'execute\'.")',
+            source,
+        )
+        self.assertIn('elif run_profile == "execute":', source)
+        self.assertNotIn('run_profile == "interactive"', source)
+        self.assertNotIn('run_profile == "full"', source)
+        self.assertIn("# Run stage. Start with inspect, then dry_run, then execute.", source)
+        markdown = notebook_source(self.nb, "markdown")
+        self.assertIn("`inspect`: print effective settings and next steps", markdown)
+        self.assertIn("`execute`: run the configured pipeline.", markdown)
+        self.assertNotIn("`interactive`: print current settings", markdown)
+        self.assertNotIn("`full`: process the configured kinds", markdown)
+        self.assertNotIn("full pipeline", markdown.lower())
+        self.assertNotIn("full execution", notebook_source(self.nb).lower())
 
     def test_delta_column_name_sanitizer_handles_schema_placeholders(self) -> None:
         funcs = extract_functions(
@@ -204,19 +584,14 @@ class NotebookSimplificationTests(unittest.TestCase):
             'ADME_SP_SECRET_NAME = ""',
             'ADME_TOKEN_SCOPE = "https://management.core.windows.net/.default"',
             'ADME_DEVICE_CODE_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"',
-            'os.environ.get("ADME_ENDPOINT")',
-            'os.environ.get("ADME_DATA_PARTITION_ID")',
-            'os.environ.get("ADME_AUTH_METHOD")',
-            'os.environ.get("ADME_MANAGED_IDENTITY_CLIENT_ID")',
-            'os.environ.get("ADME_TENANT_ID")',
-            'os.environ.get("ADME_SP_CLIENT_ID")',
-            'os.environ.get("ADME_SP_SECRET_KV_NAME")',
-            'os.environ.get("ADME_SP_SECRET_NAME")',
+            '_parameters = resolve_notebook_parameters(_parameter_settings, dict(os.environ))',
             'NOTEBOOK_VERSION = "0.5.6"',
             "ALLOW_OVERWRITE = False",
+            "WRITE_RELATIONSHIP_BRIDGES = True",
+            'write_relationship_bridges = _parameters["WRITE_RELATIONSHIP_BRIDGES"]',
             'MERGE_KEY_COLUMNS = ["id", "version"]',
             "ADME_MERGE_KEY_COLUMNS",
-            "ADME_ALLOW_OVERWRITE",
+            'allow_overwrite = _parameters["ALLOW_OVERWRITE"]',
             'WRITE_MODE = "upsert"',
             "ADME_WRITE_MODE",
             "ADME_INCREMENTAL",
@@ -224,42 +599,25 @@ class NotebookSimplificationTests(unittest.TestCase):
             'INCREMENTAL_WATERMARK_MODE = "auto"',
             'INCREMENTAL_STATE_TABLE = "silver_incremental_state"',
             "RETRY_SKIPPED_SCHEMA_RECORDS = True",
-            "ADME_INCREMENTAL_WATERMARK_COLUMN",
-            "ADME_INCREMENTAL_WATERMARK_MODE",
-            "ADME_INCREMENTAL_STATE_TABLE",
-            "ADME_RETRY_SKIPPED_SCHEMA_RECORDS",
             "config_hash = hashlib.sha256",
             "PERSIST_SCHEMA_CACHE = True",
             'SCHEMA_CACHE_TABLE = "silver_schema_cache"',
             'RUN_MANIFEST_TABLE = "silver_run_manifest"',
             'RUN_STATUS_TABLE = "silver_run_status"',
-            'schema_cache_writes_enabled = persist_schema_cache and run_profile == "full"',
-            "ADME_PERSIST_SCHEMA_CACHE",
-            "ADME_SCHEMA_CACHE_TABLE",
-            "ADME_RUN_MANIFEST_TABLE",
-            "ADME_RUN_STATUS_TABLE",
+            'schema_cache_writes_enabled = persist_schema_cache and run_profile == "execute"',
             "KIND_LIMITS = {}",
             "ADME_KIND_LIMITS",
             "kind_selectors",
             "EXCLUDED_KINDS = []",
-            "ADME_EXCLUDED_KINDS",
             "excluded_kind_selectors",
             "WRITE_OUTPUT_DOCS = True",
             'OUTPUT_DOCS_TABLE = "silver_output_documentation"',
-            "ADME_WRITE_OUTPUT_DOCS",
-            "ADME_OUTPUT_DOCS_TABLE",
             "DATA_QUALITY_CHECKS = True",
             'DATA_QUALITY_ISSUES_TABLE = "silver_data_quality_issues"',
             "DATA_QUALITY_MAX_EXAMPLES = 100",
-            "ADME_DATA_QUALITY_CHECKS",
-            "ADME_DATA_QUALITY_ISSUES_TABLE",
-            "ADME_DATA_QUALITY_MAX_EXAMPLES",
             'VERSION_STRATEGY = "versioned_tables"',
             'MISSING_SCHEMA_MODE = "skip"',
             "CREATE_EMPTY_CHILD_TABLES = True",
-            "ADME_VERSION_STRATEGY",
-            "ADME_MISSING_SCHEMA_MODE",
-            "ADME_CREATE_EMPTY_CHILD_TABLES",
             "CACHE_BRONZE = True",
             'BRONZE_CACHE_STORAGE_LEVEL = "MEMORY_AND_DISK"',
             "PREFLIGHT_KIND_COUNTS = True",
@@ -270,14 +628,6 @@ class NotebookSimplificationTests(unittest.TestCase):
             "SCHEMA_FETCH_PARALLELISM = 4",
             'OUTPUT_WRITE_PARALLELISM = "auto"',
             "WIDE_MAX_CARDINALITY_CAP = 20",
-            "ADME_CACHE_BRONZE",
-            "ADME_PREFLIGHT_KIND_COUNTS",
-            "ADME_BATCH_METADATA_WRITES",
-            "ADME_OUTPUT_DOCS_MODE",
-            "ADME_SCHEMA_PREFLIGHT",
-            "ADME_SCHEMA_FETCH_PARALLELISM",
-            "ADME_OUTPUT_WRITE_PARALLELISM",
-            "ADME_WIDE_MAX_CARDINALITY_CAP",
             "ADME_SCHEMA_TIMEOUT_SECONDS = 30",
             "ADME_SCHEMA_RETRY_TOTAL = 3",
             "ADME_SCHEMA_RETRY_BACKOFF_SECONDS = 1.0",
@@ -290,8 +640,7 @@ class NotebookSimplificationTests(unittest.TestCase):
         source = notebook_source(self.nb, "code")
         for expected in [
             "INCLUDE_INACTIVE_RECORDS = False",
-            "ADME_INCLUDE_INACTIVE_RECORDS",
-            'include_inactive_records = _env_bool("ADME_INCLUDE_INACTIVE_RECORDS", INCLUDE_INACTIVE_RECORDS)',
+            'include_inactive_records = _parameters["INCLUDE_INACTIVE_RECORDS"]',
             '"include_inactive_records": include_inactive_records',
             "def active_record_filter_status(",
             "def apply_active_record_filter(",
@@ -304,6 +653,83 @@ class NotebookSimplificationTests(unittest.TestCase):
             '_check_row("active record filter"',
         ]:
             self.assertIn(expected, source)
+
+    def test_customer_settings_are_separate_from_configuration_code(self) -> None:
+        code_cells = [cell for cell in self.nb["cells"] if cell["cell_type"] == "code"]
+        config_index = next(
+            index for index, cell in enumerate(code_cells)
+            if 'WORKSPACE_ID = ""' in "".join(cell["source"])
+        )
+        config_source = "".join(code_cells[config_index]["source"])
+        runtime_source = "".join(code_cells[config_index + 1]["source"])
+
+        self.assertNotIn("import ", config_source)
+        self.assertNotIn("def ", config_source)
+        self.assertIn("def _resolve_workspace_id(", runtime_source)
+        self.assertNotIn('WORKSPACE_ID = ""', runtime_source)
+
+    def test_relationship_bridge_is_part_of_the_pipeline_output_contract(self) -> None:
+        source = notebook_source(self.nb, "code")
+
+        self.assertIn("def relationship_bridge_table_name(", source)
+        self.assertIn('alias("_relationship_bridge_table")', source)
+        self.assertIn("def resolve_direct_relationships(", source)
+        self.assertIn("relationship_frames=relationship_frames", source)
+        self.assertIn("relationship_changed_key_frames=relationship_changed_key_frames", source)
+        self.assertIn("relationship_bridge_tables=relationship_bridge_tables", source)
+        self.assertIn('relationship_merge_keys = [f"source_{key}" for key in merge_keys]', source)
+        self.assertNotIn("__fk_id", source)
+        self.assertNotIn("__fk_version", source)
+
+    def test_relationship_bridge_flag_controls_resolution_and_is_reported(self) -> None:
+        source = notebook_source(self.nb, "code")
+        for expected in [
+            '"write_relationship_bridges": write_relationship_bridges',
+            "if write_relationship_bridges and registry.direct_relationship_fields(kind):",
+            "if schema_registry and write_relationship_bridges:",
+            'row["relationship_bridges_enabled"] and row["schema_resolved"]',
+            'T.StructField("relationship_bridges_enabled", T.BooleanType(), True)',
+            "relationship_bridges_enabled,",
+            "write_relationship_bridges=write_relationship_bridges",
+        ]:
+            self.assertIn(expected, source)
+
+    def test_run_manifest_records_disabled_relationship_bridges(self) -> None:
+        run_manifest_row = extract_function(self.nb, "run_manifest_row")
+
+        class Clock:
+            @staticmethod
+            def now(_timezone):
+                return "created-at"
+
+        run_manifest_row.__globals__.update({
+            "UTC": None,
+            "datetime": Clock,
+            "kind_family_key": lambda kind: kind,
+            "kind_version": lambda kind: "1.0.0",
+            "version_strategy": "merge",
+            "output_docs_mode": "summary",
+            "persist_schema_cache": True,
+            "cache_bronze": True,
+            "include_inactive_records": False,
+        })
+        result = SimpleNamespace(
+            kind="osdu:wks:master-data--Well:1.0.0",
+            child_tables=[],
+            schema_mode="resolved",
+            parent_table="well",
+            records_processed=1,
+            status="success",
+            error=None,
+            quality_status="passed",
+            quality_issue_count=0,
+        )
+        row = run_manifest_row(
+            "run-id", result, "normalized", "", "osducatalog", "execute", "0.5.6",
+            "config-hash", False, "upsert", ["id", "version"], None, "off", False,
+        )
+
+        self.assertFalse(row[-1])
 
     def test_setup_checklist_dry_run_and_manifest_are_present(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -343,7 +769,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             "INCREMENTAL_STATE_SCHEMA",
             "def load_incremental_watermark_state(",
             "table_name = _metadata_table_name(workspace_id, lakehouse_id, logical_table_name) if workspace_id or lakehouse_id else logical_table_name",
-            "load_incremental_watermark_state(spark, None, watermark_column, workspace_id, lakehouse_id)",
+            "load_incremental_watermark_state(spark, None, watermark_column, workspace_id, lakehouse_id, context_id=context_id)",
             "def load_schema_retry_kinds(",
             "def apply_incremental_watermark_filter(",
             "def apply_incremental_watermark_filter_all_kinds(",
@@ -385,14 +811,12 @@ class NotebookSimplificationTests(unittest.TestCase):
             "def _write_schema_docs_to_persistent_cache(",
             "validate_adme_schema_service_access()",
             'timings["schema_access_check"]',
-            "def write_run_manifest(",
             "def write_run_status(",
             "def _output_tables_from_results(",
             "def collect_data_quality_issues(",
             "def evaluate_and_write_data_quality_issues(",
             "def write_data_quality_issues(",
             "def flush_data_quality_issue_rows(",
-            "def write_output_documentation(",
             "def output_documentation_rows(",
             "def _buffer_or_write_output_documentation(",
             "def validate_table_names(",
@@ -417,8 +841,6 @@ class NotebookSimplificationTests(unittest.TestCase):
             'T.StructField("version_strategy", T.StringType(), True)',
             'T.StructField("schema_versions", T.ArrayType(T.StringType()), True)',
             'T.StructField("schema_mode", T.StringType(), True)',
-            "_load_schema_doc_from_persistent_cache",
-            "_write_schema_doc_to_persistent_cache",
             "silver_output_documentation",
             "silver_data_quality_issues",
             "Timing summary",
@@ -429,7 +851,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             'final_status = "failed" if failed else "committed"',
             "outputs are not marked committed",
             "ADME schema retries",
-            "affected kinds are pruned before schema preflight",
+            "filters source writes; enabled bridges reconcile all selected published sources against globally observed targets",
             "explicit inactive rows hard-delete Silver keys",
             "inactive rows are included by configuration",
             "inactive_delete_preview_rows",
@@ -454,7 +876,7 @@ class NotebookSimplificationTests(unittest.TestCase):
 
         retry_kinds_index = source.index("schema_retry_kinds = load_schema_retry_kinds(")
         changed_slice_index = source.index("affected_bronze_df = apply_incremental_watermark_filter_all_kinds(")
-        kind_pruning_index = source.index("kinds = resolve_affected_kind_selectors(")
+        kind_pruning_index = source.index("kinds = resolve_affected_kind_selectors(", changed_slice_index)
         schema_access_index = source.index("schema_access_detail = validate_adme_schema_service_access()")
         schema_preflight_index = source.index("schema_registry, schema_status = prefetch_schema_registry(kinds, enabled=True)")
 
@@ -462,6 +884,7 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertLess(changed_slice_index, kind_pruning_index)
         self.assertLess(kind_pruning_index, schema_access_index)
         self.assertLess(schema_access_index, schema_preflight_index)
+        self.assertIn("if write_relationship_bridges:\n                kinds = selected_kinds", source)
 
     def test_performance_resilience_controls_are_present(self) -> None:
         source = notebook_source(self.nb, "code")
@@ -486,21 +909,22 @@ class NotebookSimplificationTests(unittest.TestCase):
         self.assertIn("import sempy.fabric as fabric", source)
         self.assertIn("fabric.get_sku_size(workspace=workspace_id or None)", source)
         self.assertIn("Writing %d Silver table(s) with output_write_parallelism=%d", source)
-        self.assertIn("future_by_target = {executor.submit(write_silver_table, df, target, mode): target for df, target in writes}", source)
+        self.assertIn("future_by_target = {executor.submit(write_silver_table, df, target, mode, **options): target for df, target in writes}", source)
         self.assertIn("quality_issue_rows.extend(rows)", source)
         self.assertIn("flush_data_quality_issue_rows(spark, data_quality_issue_rows, workspace_id, lakehouse_id)", source)
         self.assertIn("limits_active = _processing_limits_active(limit, kind_limits)", source)
-        self.assertIn('cache_enabled=bool(globals().get("cache_bronze", True)) and not limits_active', source)
+        self.assertIn('if bool(globals().get("cache_bronze", True)) and not limits_active:', source)
+        self.assertIn('.option("versionAsOf", publication["source_version"]).load(publication["source_path"])', source)
         self.assertIn('not watermark_filter_active and not limits_active', source)
         self.assertIn("Skipping kind count preflight for limited run", source)
         self.assertIn("effective_cardinality_cap = max_cardinality_cap or _wide_max_cardinality_cap()", source)
         self.assertIn("_adme_schema_get_json(list_url", source)
         self.assertIn("_adme_schema_get_json(schema_url", source)
         self.assertIn("def validate_incremental_limit_safety(", source)
-        self.assertIn("> F.lit(previous).cast(data_type)", source)
-        self.assertIn("> F.col(\"__previous_watermark\").cast(data_type)", source)
+        self.assertIn(">= F.lit(previous).cast(data_type)", source)
+        self.assertIn(">= F.col(\"__previous_watermark\").cast(data_type)", source)
         self.assertIn("apply_active_filter=False", source)
-        self.assertIn("apply_active_filter=True", source)
+        self.assertIn("bronze_df = apply_active_record_filter(pinned_bronze_df)", source)
         self.assertIn("include_inactive_records=False", source)
         self.assertIn('F.lower(F.col("isActive").cast("string")).isin("false", "0")', source)
         self.assertIn("if not successful_kinds and inactive_keys_df is None:", source)
@@ -738,6 +1162,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             [
                 "_sanitize_table_name_part",
                 "_child_table_suffix",
+                "_child_table_prefix",
                 "child_table_name",
             ],
         )
@@ -864,6 +1289,7 @@ class NotebookSimplificationTests(unittest.TestCase):
             self.nb,
             [
                 "_data_quality_enabled",
+                "_parameter_int",
                 "_data_quality_max_examples",
                 "_data_quality_issues_table_name",
             ],
@@ -878,7 +1304,7 @@ class NotebookSimplificationTests(unittest.TestCase):
         funcs["_data_quality_issues_table_name"].__globals__["data_quality_issues_table"] = "custom_quality"
 
         self.assertFalse(funcs["_data_quality_enabled"]())
-        self.assertEqual(funcs["_data_quality_max_examples"](), 1)
+        self.assertEqual(funcs["_data_quality_max_examples"](), 0)
         self.assertEqual(funcs["_data_quality_issues_table_name"](), "custom_quality")
 
     def test_performance_configuration_helpers(self) -> None:

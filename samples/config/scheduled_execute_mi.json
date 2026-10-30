@@ -1,9 +1,9 @@
 {
-  "description": "Scheduled production-style full run using managed identity authentication.",
+  "description": "Scheduled production-style pipeline execution using managed identity authentication.",
   "settings": {
     "ADME_AUTH_METHOD": "MI",
     "ADME_MANAGED_IDENTITY_CLIENT_ID": "",
-    "RUN_PROFILE": "full",
+    "RUN_PROFILE": "execute",
     "KINDS": [
       "*:*:*:*"
     ],
@@ -18,6 +18,7 @@
     "INCREMENTAL_WATERMARK_COLUMN": "ingestTime",
     "INCREMENTAL_WATERMARK_MODE": "required",
     "OUTPUT_MODE": "normalized",
+    "WRITE_RELATIONSHIP_BRIDGES": true,
     "TABLE_PREFIX": "",
     "ALLOW_OVERWRITE": false,
     "PERSIST_SCHEMA_CACHE": true,

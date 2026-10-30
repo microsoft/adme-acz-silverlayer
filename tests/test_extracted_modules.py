@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 import re
 import sys
@@ -40,6 +41,7 @@ def extract_functions(function_names: list[str]) -> dict[str, object]:
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)
     namespace: dict[str, object] = {
+        "hashlib": hashlib,
         "json": json,
         "os": __import__("os"),
         "re": re,
@@ -94,6 +96,7 @@ class ExtractedModuleTests(unittest.TestCase):
                 "kind_to_table_name",
                 "_sanitize_table_name_part",
                 "_child_table_suffix",
+                "_child_table_prefix",
                 "child_table_name",
                 "kind_parts",
                 "kind_family_key",
@@ -134,6 +137,39 @@ class ExtractedModuleTests(unittest.TestCase):
         self.assertEqual(naming.filter_excluded_kinds([welllog, organisation_v1], ["osdu:wks:master-data--Organisation:*"]), funcs["_filter_excluded_kinds"]([welllog, organisation_v1], ["osdu:wks:master-data--Organisation:*"]))
         self.assertEqual(naming.kind_selectors_require_discovery([welllog, "osdu:wks:*:*"]), funcs["kind_selectors_require_discovery"]([welllog, "osdu:wks:*:*"]))
         self.assertEqual(naming.matches_kind_selector(welllog, "*:wks:work-product-component--Well*:1.*"), funcs["matches_kind_selector"](welllog, "*:wks:work-product-component--Well*:1.*"))
+
+    def test_array_table_names_are_bounded_and_match_notebook(self) -> None:
+        funcs = extract_functions(
+            ["_sanitize_table_name_part", "_child_table_suffix", "_child_table_prefix", "child_table_name", "_is_array_child"],
+        )
+        for parent in ("osdu_wks_well", "p" * 106, "p" * 107, "p" * 123, "p" * 124, "p" * 125, "p" * 128):
+            for field in ("x", "x" * 113, "nested__" * 20 + "first", "nested__" * 20 + "second"):
+                with self.subTest(parent_length=len(parent), field=field):
+                    actual = naming.child_table_name(parent, f"data__{field}")
+                    self.assertEqual(actual, funcs["child_table_name"](parent, f"data__{field}"))
+                    self.assertEqual(naming.child_table_prefix(parent), funcs["_child_table_prefix"](parent))
+                    self.assertLessEqual(len(actual), 128)
+                    self.assertRegex(actual, r"^[A-Za-z_][A-Za-z0-9_]*$")
+                    full = f"{parent}___{field}"
+                    if len(full) <= 128:
+                        self.assertEqual(actual, full)
+                    else:
+                        self.assertEqual(len(actual), 128)
+                        self.assertTrue(actual.startswith(naming.child_table_prefix(parent)))
+                        digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
+                        self.assertTrue(actual.endswith(f"__{digest}"))
+                    self.assertEqual(actual, naming.child_table_name(parent, f"data__{field}"))
+                    self.assertTrue(naming.is_array_child(actual, parent))
+                    self.assertEqual(naming.is_array_child(actual, parent), funcs["_is_array_child"](actual, parent))
+        prefix = "data__" + "nested__" * 20
+        self.assertNotEqual(
+            naming.child_table_name("osdu_wks_well", prefix + "first"),
+            naming.child_table_name("osdu_wks_well", prefix + "second"),
+        )
+        self.assertNotEqual(
+            naming.child_table_name("p" * 127 + "a", "data__items"),
+            naming.child_table_name("p" * 127 + "b", "data__items"),
+        )
 
     def test_schema_helpers_match_notebook(self) -> None:
         funcs = extract_functions(

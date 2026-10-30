@@ -1,5 +1,5 @@
 {
-  "description": "Interactive first-run configuration using service principal authentication.",
+  "description": "First-run settings inspection using service principal authentication.",
   "settings": {
     "WORKSPACE_ID": "",
     "LAKEHOUSE_ID": "",
@@ -12,7 +12,7 @@
     "ADME_SP_SECRET_KV_NAME": "<key-vault-name-or-url>",
     "ADME_SP_SECRET_NAME": "<secret-name>",
     "ADME_MANAGED_IDENTITY_CLIENT_ID": "",
-    "RUN_PROFILE": "interactive",
+    "RUN_PROFILE": "inspect",
     "KINDS": [
       "osdu:wks:work-product-component--WellLog:1.4.0"
     ],
@@ -20,6 +20,7 @@
     "LIMIT": 10,
     "KIND_LIMITS": {},
     "OUTPUT_MODE": "normalized",
+    "WRITE_RELATIONSHIP_BRIDGES": true,
     "TABLE_PREFIX": "test_",
     "ALLOW_OVERWRITE": false
   }
